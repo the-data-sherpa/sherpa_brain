@@ -13,6 +13,7 @@ than "present state is unchanged":
 
 from __future__ import annotations
 
+import contextlib
 import os
 from datetime import date
 
@@ -65,10 +66,8 @@ def crash_after(paths: Paths, n_syscalls: int, payload: bytes, predecessor: str 
 
         os.fsync = counting_fsync  # type: ignore[assignment]
         atomic.os.fsync = counting_fsync  # type: ignore[attr-defined]
-        try:
+        with contextlib.suppress(BaseException):
             mem.write(paths, MID, payload, predecessor)
-        except BaseException:
-            pass
         os._exit(0)
     os.waitpid(pid, 0)
 

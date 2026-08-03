@@ -161,10 +161,18 @@ class Evidence:
 
     @classmethod
     def parse(cls, raw: str) -> Evidence:
+        """Parse ``ref#L<start>-<end>``.
+
+        Tolerant of a repeated ``L`` on the end bound (``#L4-L8``), because that is
+        how a human writes it and how most code hosts render it. A pointer that
+        fails to parse degrades to a bare ref rather than raising — losing the span
+        is recoverable, losing the evidence link is not.
+        """
         if "#L" not in raw:
             return cls(raw)
         ref, _, span = raw.partition("#L")
         start, _, end = span.partition("-")
+        end = end.lstrip("Ll")
         try:
             return cls(ref, int(start), int(end) if end else int(start))
         except ValueError:
