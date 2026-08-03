@@ -1338,7 +1338,7 @@ Stated because the brief was to avoid leaning on vendors, and because §4 rests 
 
 ## Appendix B — Adversarial Review Log
 
-Twenty rounds against an independent reviewer (Codex/GPT-5). Protocol: each side states a position, argues it, and either concedes or refutes with a named failure — not comment exchange. Fifty findings (16 G, 4 N, 3 O, 27 V), all resolved. Entries are chronological, so an early fix may be superseded by a later one — where that happens it is marked. Recorded because the failed attempts are the useful part.
+Twenty rounds against an independent reviewer (Codex/GPT-5) — ten on the design, ten on the implementation plan. Protocol: each side states a position, argues it, and either concedes or refutes with a named failure — not comment exchange. Fifty findings (16 G, 4 N, 3 O, 27 V), all resolved. Entries are chronological, so an early fix may be superseded by a later one — where that happens it is marked. Recorded because the failed attempts are the useful part.
 
 ### What the review changed
 

@@ -25,7 +25,7 @@ Open questions in `BLUEPRINT.md` §19, or absent from it entirely. Settled; not 
 | 8 | Eval seed | **Scaffold + `brain eval bootstrap`** from the real corpus | §10.1 |
 | 9 | Tombstone replica 2 | **Private GitHub `brain-ledger`**, append-only ref, ack by re-read | §11.5.3 |
 | 10 | Backup | **Auto-detect: btrfs snapshot preferred, validated double-collection fallback** | §11.5.2 |
-| 11 | Repository | **`git init` in place, local-only** | §6.2, §6.10 |
+| 11 | Repository | **`git init` in place, local-only** | §6.2, §6.8 |
 
 ### 0.1 Decisions that narrow the blueprint, recorded as such
 
@@ -580,6 +580,22 @@ Across eight rounds, four separate blocking findings were the same mistake:
 | R4 | Ledger unreachable makes deletion feel broken | Suppression is immediate and unconditional; only the receipt waits. `brain status` surfaces pending |
 | R5 | Derivability test passes trivially on an empty corpus | Fixture exercises every type, status, workspace, and edge case; scan order shuffled, mtimes touched |
 | R6 | Eval numbers taken seriously too early | Slope refused below 150 items; `n` always printed |
+
+---
+
+## 5.5 Review outcome — CONSENSUS
+
+Eleven rounds of adversarial review against an independent reviewer (Codex/GPT-5), 27 findings against this plan and 17 against the blueprint, all resolved. Recorded in the reviewer's own words rather than paraphrased, so the record cannot be shaded in the plan's favour:
+
+> - Canonical memory and evidence remain inspectable, erasable files; SQLite remains wholly derived and rebuildable.
+> - Writes durably record intent, publish complete staged revisions without overwrite, atomically capture displaced state, and fail closed on divergence.
+> - Conflict and quarantine visibility ship when those states first become possible; mutating repair follows the crash-safe resolution machinery.
+> - Human judgment resolves contested branches, with losing revisions and resolved conflict records retained for audit.
+> - Tombstones suppress every read immediately, while replication quorum governs only successful deletion acknowledgment.
+> - Backup and restore establish currency externally and refuse service when it cannot be proven.
+> - The plan's build order has no remaining production-relevant forward dependency, and all eleven invariants remain represented.
+
+**What consensus means here.** Two independent reviewers, arguing adversarially, could not find a further defect that would change what gets built or fail in production. It does not mean the plan is correct — the crash-durability assumption (§0.5), the ledger authorship limitation (Step 7), and the residual-risk statement in `BLUEPRINT.md` §11.5.3 all remain live. Consensus is the absence of found defects, not proof of their absence.
 
 ---
 
