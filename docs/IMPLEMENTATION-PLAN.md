@@ -599,6 +599,71 @@ Eleven rounds of adversarial review against an independent reviewer (Codex/GPT-5
 
 ---
 
+## 5.6 Build status — COMPLETE
+
+All fourteen steps are built and all nineteen acceptance criteria in §1 pass. **133 tests**, four runtime dependencies, ~7,600 lines including tests.
+
+| Step | Status |
+|---|---|
+| 0 — ADRs | done — six files, each with reversal criteria |
+| 1 — primitives + probe | done — `RENAME_EXCHANGE` via ctypes syscall; probe + denylist |
+| 2 — model / front matter / scanner / quarantine | done — fail-closed parsing; scanner rejects, never redacts |
+| 3 — events / artifacts | done — content-addressed evidence; pointers resolve to source spans |
+| 4 — derived index | done — three enforcement tests incl. derivability under shuffled scan order |
+| 5 — write protocol + op lifecycle + recovery | done — crash fault injection at every boundary, verified to fire |
+| 6 — reconciliation | done — stable-read; defers on flux; stamps `capture: reconciled` with an interval |
+| 7 — tombstones / acks / purges | done — three hash-chained ledgers; broken chain refuses to serve |
+| 8 — resolution ordering | done — marker archived last via `RENAME_NOREPLACE`; losing branch retained |
+| 9 — search behind the boundary | done — rungs 0 and 1; scoping defaults to deny |
+| 10 — deletion / purge / backup / restore | done — suppression immediate; currency proven from outside |
+| 11 — resolution UX | done — visibility ships with the step that creates the state |
+| 12 — MCP + adapters | done — four tools; purity check at generation *and* write |
+| 13 — export + eval | done — three instruments, failure taxonomy, bootstrap |
+
+**Commands:** `init`, `remember`, `search`, `get`, `forget`, `sync`, `ingest`, `record`, `evidence`, `reconcile`, `reindex`, `validate`, `status`, `recover`, `export`, `adapter`, `conflicts list/show/resolve`, `quarantine list`, `eval bootstrap/run/probe/slope`, `backup create/list/verify/restore`. Plus the MCP server.
+
+### What the build found that review did not
+
+Nine defects surfaced during implementation, and the pattern is worth recording: **five were found by running the system, not by testing it.** Unit tests confirm the code does what you wrote; smoke tests reveal what you forgot to write.
+
+| # | Defect | Why tests missed it |
+|---|---|---|
+| 1 | Present was a hard link to the revision's inode, so an in-place edit rewrote published history | Needed a real editor write against a real inode |
+| 2 | `recorded_at` regenerated at parse time, making the index non-deterministic | Caught by the derivability test — which exists *because* the review demanded it |
+| 3 | Interval lower bound read *after* publishing, collapsing it to a point | Caught by a test written to be strict about the interval |
+| 4 | Reconciled revisions recorded `capture: mediated` | Smoke test — the field was present and wrong, not absent |
+| 5 | Deleted content survived in the query log | Smoke test — the log reads as telemetry, so nothing treated it as storage |
+| 6 | Second-precision timestamps too coarse for an audit interval | Test flakiness that turned out to be a real modelling error |
+| 7 | `Evidence.parse` rejected `#L4-L8`, the form a human writes | Conformance test using a realistic pointer |
+| 8 | **Operator attestation resurrected deleted content** — attesting a sequence number is not possessing the entries | Smoke test |
+| 9 | **Restore copied files before proving currency**, so a refusal left the bytes on disk | Smoke test |
+
+Defects 8 and 9 share the shape the entire review was about: *a check that passes while the property fails.* Both would have shipped as silent data-loss bugs — one resurrecting deleted content, the other leaving it on disk for a later `reindex` to serve.
+
+### Deliberately not built
+
+Everything in §4, unchanged: background extraction, the proposal review queue and TUI, consolidation, cache/cost metrics (zero model calls — they would report a fake zero), dense retrieval, graph store, PostgreSQL, and the Cursor/OpenCode/Aider adapters. Each is gated on a written trigger or declared a non-goal.
+
+**One honest gap that is not a build gap:** the golden set is a template with worked examples and drafted candidates, not 150 real questions. It cannot be — it needs a real corpus. `brain eval bootstrap` drafts from what you have, and `eval slope` refuses to compute below the floor rather than emitting a falsely precise number. That gap closes by using the system.
+
+---
+
+## 5.5 Review outcome — CONSENSUS
+
+Eleven rounds of adversarial review against an independent reviewer (Codex/GPT-5), 27 findings against this plan and 17 against the blueprint, all resolved. Recorded in the reviewer's own words rather than paraphrased, so the record cannot be shaded in the plan's favour:
+
+> - Canonical memory and evidence remain inspectable, erasable files; SQLite remains wholly derived and rebuildable.
+> - Writes durably record intent, publish complete staged revisions without overwrite, atomically capture displaced state, and fail closed on divergence.
+> - Conflict and quarantine visibility ship when those states first become possible; mutating repair follows the crash-safe resolution machinery.
+> - Human judgment resolves contested branches, with losing revisions and resolved conflict records retained for audit.
+> - Tombstones suppress every read immediately, while replication quorum governs only successful deletion acknowledgment.
+> - Backup and restore establish currency externally and refuse service when it cannot be proven.
+> - The plan's build order has no remaining production-relevant forward dependency, and all eleven invariants remain represented.
+
+**What consensus means here.** Two independent reviewers, arguing adversarially, could not find a further defect that would change what gets built or fail in production. It does not mean the plan is correct — the crash-durability assumption (§0.5), the ledger authorship limitation (Step 7), and the residual-risk statement in `BLUEPRINT.md` §11.5.3 all remain live. Consensus is the absence of found defects, not proof of their absence.
+
+---
+
 ## 5.6 Build status
 
 Updated as steps land. A step is "done" only when its tests pass, not when its code exists.

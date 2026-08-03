@@ -39,36 +39,29 @@ reader than a clean surface.
 
 ## Status
 
-**Phase 0.5 works.** You can initialize a store, write memories, search them (ripgrep or
-FTS5 behind one tool boundary), fetch them with provenance, drop and rebuild the index
-losslessly, and see what failed validation. 27 tests pass.
+**Phase 0.5 and Phase 1 are complete.** All fourteen steps built, all nineteen acceptance
+criteria passing, **133 tests**, four runtime dependencies.
 
-**Deletion works.** `brain forget` suppresses retrieval immediately and unconditionally —
-never waiting on the network — while replica quorum gates only the success receipt. An
-unreplicated deletion exits `3` (pending), never `0`, and there is deliberately no flag
-that turns one into the other. Restoring a pre-deletion backup does not resurrect the
-content, because the tombstone ledger lives outside the restored domain. 41 tests pass.
+```
+brain init                          brain forget <id>        # exits 3 if unreplicated
+brain remember "..."                brain sync
+brain search <query>                brain backup create|verify|restore
+brain get <id> --history            brain export <dir>
+brain ingest <file>                 brain reconcile
+brain record "..."                  brain conflicts list|show|resolve
+brain evidence <ref> --lines 4-8    brain eval bootstrap|run|probe|slope
+```
 
-**Direct edits are supported, not merely tolerated.** Edit a memory file in vim or with
-an agent's `Edit` tool, then run `brain reconcile`: the edit is captured as a revision
-stamped `capture: reconciled` with a transaction-time *interval*, because nobody knows
-when an unwitnessed edit actually happened. Files still being written are deferred and
-reported, never guessed at.
+Plus an MCP server exposing four tools.
 
-**Divergences require a human.** Two writes from one predecessor retain both branches and
-mark the memory contested — reads fail closed until `brain conflicts resolve`. The losing
-branch stays in the log permanently, because a resolution is a decision, not an erasure.
+**What is deliberately absent:** background extraction, consolidation, dense retrieval,
+a graph store, and PostgreSQL. Each is gated on a written trigger in
+[`docs/decisions/0002-migration-triggers.md`](docs/decisions/0002-migration-triggers.md)
+rather than on enthusiasm. None of those triggers is met on day one, by construction.
 
-**Agents reach it over MCP.** Four tools — `brain.search`, `brain.get`, `brain.write`,
-`brain.forget` — because every tool description is a fixed tax on every request for the
-whole session. `forget` is deliberately its own tool: a destructive operation should
-never be reachable by mistyping an enum on a general one. Generated adapter files carry
-**pointers only**, enforced by a check that runs at generation and again at write.
-
-**Still to come:** events and artifacts, backup/restore commands, and the eval runner.
-108 tests pass.
-
-See [`docs/IMPLEMENTATION-PLAN.md`](docs/IMPLEMENTATION-PLAN.md) §5.6 for the step-by-step status.
+**The one real gap:** the golden set is a template plus drafted candidates, not 150 real
+questions — it needs a corpus that only use produces. `brain eval slope` refuses to
+compute below the item floor rather than emitting a precise-looking number from noise.
 
 ## Requirements
 
