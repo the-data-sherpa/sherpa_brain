@@ -1,0 +1,26 @@
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.egg-info/
+dist/
+build/
+.coverage
+htmlcov/
+
+# Generated adapter output — regenerated, never authored (§11.3)
+.mcp.json
+CLAUDE.md
+
+# Canonical mutable state lives entirely OUTSIDE this repo, at
+# $XDG_STATE_HOME/brain/. Nothing here should ever reference it, but
+# these guards catch an accidental `brain init --state .` mistake.
+memories/
+events/
+artifacts/
+tombstones.jsonl
+acks.jsonl
+purges.jsonl
+brain.sqlite3*
