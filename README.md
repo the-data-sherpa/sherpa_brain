@@ -39,7 +39,18 @@ reader than a clean surface.
 
 ## Status
 
-Phase 0.5 + Phase 1 under construction. Not yet usable.
+**Phase 0.5 works.** You can initialize a store, write memories, search them (ripgrep or
+FTS5 behind one tool boundary), fetch them with provenance, drop and rebuild the index
+losslessly, and see what failed validation. 27 tests pass.
+
+**Phase 1 is roughly half built.** The write protocol, durable intent records, divergence
+handling, and the derived index are in. Reconciliation, tombstones, and **deletion are
+not** — and deletion is one of the three properties this project exists for, so that gap
+is the significant one. There is deliberately no `brain forget` command rather than a
+stubbed one: a deletion path that half-works would report success while leaving content
+retrievable, which is worse than not offering it.
+
+See [`docs/IMPLEMENTATION-PLAN.md`](docs/IMPLEMENTATION-PLAN.md) §5.6 for the step-by-step status.
 
 ## Requirements
 

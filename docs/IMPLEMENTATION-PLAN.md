@@ -599,6 +599,33 @@ Eleven rounds of adversarial review against an independent reviewer (Codex/GPT-5
 
 ---
 
+## 5.6 Build status
+
+Updated as steps land. A step is "done" only when its tests pass, not when its code exists.
+
+| Step | Status | Notes |
+|---|---|---|
+| 0 — ADRs | **done** | Six files, each with reversal criteria |
+| 1 — primitives + probe | **done** | `RENAME_EXCHANGE` via ctypes syscall; capability probe + denylist |
+| 2 — model / front matter / scanner / quarantine | **done** | Fail-closed parsing; credential scanner rejects, never redacts |
+| 3 — events / artifacts | **not started** | Evidence pointers currently resolve to opaque refs |
+| 4 — derived index | **done** | Three enforcement tests, incl. derivability under shuffled scan order |
+| 5 — write protocol + op lifecycle + recovery + conflicts CLI | **partial** | Protocol, intent records, divergence, `conflicts list/show` done. **Crash fault-injection tests not written.** |
+| 6 — reconciliation (stable-read) | **not started** | Unwitnessed edits are *detected*; not yet captured as revisions |
+| 7 — tombstones / acks / purges | **not started** | — |
+| 8 — resolution ordering | **not started** | `conflicts resolve` not implemented |
+| 9 — search behind the boundary | **done** | Rungs 0 and 1; workspace scoping defaults to deny |
+| 10 — deletion / purge / backup / restore | **not started** | **The differentiating feature. Not built.** |
+| 11 — resolution UX | **partial** | Read-only half shipped with Steps 2 and 5 |
+| 12 — MCP + adapters | **not started** | — |
+| 13 — export + eval | **not started** | — |
+
+**What works today:** `init`, `remember`, `search`, `get`, `reindex`, `validate`, `status`, `recover`, `conflicts list/show`, `quarantine list`. 27 tests passing.
+
+**What is deliberately not claimed:** there is no `forget`. Deletion is the property this project exists for, and a half-built deletion path is worse than none — it would report success while leaving content retrievable. It is not stubbed, so nothing can call it by mistake.
+
+---
+
 ## 6. Verification gate
 
 `pytest` green across `unit/`, `integration/`, `crash/`, `conformance/`; `brain validate` clean; `ruff` and `mypy` clean; and all nineteen criteria in §1 passing as automated tests — including the backup-resurrection test, with no manual step.
