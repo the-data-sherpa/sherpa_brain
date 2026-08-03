@@ -43,12 +43,14 @@ reader than a clean surface.
 FTS5 behind one tool boundary), fetch them with provenance, drop and rebuild the index
 losslessly, and see what failed validation. 27 tests pass.
 
-**Phase 1 is roughly half built.** The write protocol, durable intent records, divergence
-handling, and the derived index are in. Reconciliation, tombstones, and **deletion are
-not** — and deletion is one of the three properties this project exists for, so that gap
-is the significant one. There is deliberately no `brain forget` command rather than a
-stubbed one: a deletion path that half-works would report success while leaving content
-retrievable, which is worse than not offering it.
+**Deletion works.** `brain forget` suppresses retrieval immediately and unconditionally —
+never waiting on the network — while replica quorum gates only the success receipt. An
+unreplicated deletion exits `3` (pending), never `0`, and there is deliberately no flag
+that turns one into the other. Restoring a pre-deletion backup does not resurrect the
+content, because the tombstone ledger lives outside the restored domain. 41 tests pass.
+
+**Still to come:** events and artifacts, reconciliation of unwitnessed edits, conflict
+resolution, backup/restore commands, the MCP server and adapters, and export/eval.
 
 See [`docs/IMPLEMENTATION-PLAN.md`](docs/IMPLEMENTATION-PLAN.md) §5.6 for the step-by-step status.
 

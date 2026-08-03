@@ -612,17 +612,21 @@ Updated as steps land. A step is "done" only when its tests pass, not when its c
 | 4 — derived index | **done** | Three enforcement tests, incl. derivability under shuffled scan order |
 | 5 — write protocol + op lifecycle + recovery + conflicts CLI | **partial** | Protocol, intent records, divergence, `conflicts list/show` done. **Crash fault-injection tests not written.** |
 | 6 — reconciliation (stable-read) | **not started** | Unwitnessed edits are *detected*; not yet captured as revisions |
-| 7 — tombstones / acks / purges | **not started** | — |
+| 7 — tombstones / acks / purges | **done** | Three hash-chained ledgers; broken chain refuses to serve; quorum counts distinct replica identities |
 | 8 — resolution ordering | **not started** | `conflicts resolve` not implemented |
 | 9 — search behind the boundary | **done** | Rungs 0 and 1; workspace scoping defaults to deny |
-| 10 — deletion / purge / backup / restore | **not started** | **The differentiating feature. Not built.** |
+| 10 — deletion / purge | **done** | Suppression immediate and unconditional; quorum gates only the receipt; resumable. Backup/restore commands still to come |
 | 11 — resolution UX | **partial** | Read-only half shipped with Steps 2 and 5 |
 | 12 — MCP + adapters | **not started** | — |
 | 13 — export + eval | **not started** | — |
 
-**What works today:** `init`, `remember`, `search`, `get`, `reindex`, `validate`, `status`, `recover`, `conflicts list/show`, `quarantine list`. 27 tests passing.
+**What works today:** `init`, `remember`, `search`, `get`, `forget`, `sync`, `reindex`, `validate`, `status`, `recover`, `conflicts list/show`, `quarantine list`. **41 tests passing.**
 
-**What is deliberately not claimed:** there is no `forget`. Deletion is the property this project exists for, and a half-built deletion path is worse than none — it would report success while leaving content retrievable. It is not stubbed, so nothing can call it by mistake.
+**Deletion works end to end**, including the headline test: back up, delete, restore the pre-deletion backup, and the content does not come back — because the ledger lives outside the restored domain.
+
+**A leak the tests did not catch, and a smoke test did.** The query log pairs a query string with the IDs it returned, and a query is very often a fragment of the memory itself. After a deletion, the words you asked to forget were still sitting in `logs/queries.jsonl` — a file that reads as telemetry rather than storage. `purge` now reaches it, and there is a regression test. Worth recording because it is the exact shape of failure §11.5 warns about: deletion has to reach *every* derived representation, and the ones you do not think of as storage are the ones that survive.
+
+**Still missing:** events/artifacts (Step 3), reconciliation (Step 6), conflict resolution (Step 8), backup/restore commands (Step 10 remainder), MCP + adapters (Step 12), export + eval (Step 13), and crash fault-injection tests for Step 5.
 
 ---
 

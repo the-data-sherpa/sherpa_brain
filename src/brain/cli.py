@@ -28,8 +28,8 @@ from .index import build
 from .model import Evidence, Memory, MemoryType, ProvenanceClass, Volatility
 from .search.fts5 import Fts5Backend
 from .search.ripgrep import RipgrepBackend
+from .store import deletion, ledger, revisions
 from .store import memory as mem
-from .store import revisions
 
 EXIT_OK, EXIT_EMPTY, EXIT_INVALID, EXIT_PENDING, EXIT_FAIL_CLOSED = 0, 1, 2, 3, 4
 
@@ -152,6 +152,7 @@ def search(
 ) -> None:
     """Search memories. Scoped to the current workspace unless --scope-all."""
     p = _paths(state)
+    _require_intact_ledgers(p)
     ws = None if all_workspaces else workspace
     backend = RipgrepBackend(p) if rung == 0 else Fts5Backend(p)
     hits = backend.search(query, workspace=ws, limit=limit, as_of=as_of)
@@ -208,6 +209,7 @@ def get(
 ) -> None:
     """Fetch a memory with its provenance."""
     p = _paths(state)
+    _require_intact_ledgers(p)
     conn = build.connect(p)
     row = conn.execute("SELECT * FROM memory_index WHERE id = ?", (memory_id,)).fetchone()
     if row is None:
@@ -280,16 +282,25 @@ def status(state: StateOpt = None) -> None:
     from .store.ops import pending_ops, stuck_ops
 
     p = _paths(state)
+    try:
+        deletion.verify_all_ledgers(p)
+        ledger_health = "intact"
+    except ledger.LedgerError as exc:
+        ledger_health = f"BROKEN — {exc}"
     emit(
         {
             "root": str(p.root),
+            "ledgers": ledger_health,
             "pending_ops": [o.opid for o in pending_ops(p)],
             "stuck_ops": [{"opid": o.opid, "why": why} for o, why in stuck_ops(p)],
             "conflicts": [c.stem for c in p.conflicts.glob("*.json")]
             if p.conflicts.is_dir()
             else [],
+            "pending_deletions": deletion.pending_deletions(p),
         }
     )
+    if ledger_health != "intact":
+        raise typer.Exit(EXIT_FAIL_CLOSED)
 
 
 @conflicts_app.command("list")
@@ -335,6 +346,100 @@ def quarantine_list(state: StateOpt = None) -> None:
     emit(items)
     if not items:
         raise typer.Exit(EXIT_EMPTY)
+
+
+def _require_intact_ledgers(p: config.Paths) -> None:
+    """Refuse to serve on a broken chain.
+
+    The tombstone ledger is the anti-resurrection authority. An authority that cannot
+    prove its own integrity is not one, so this is a hard stop rather than a warning.
+    """
+    try:
+        deletion.verify_all_ledgers(p)
+    except ledger.LedgerError as exc:
+        err(str(exc))
+        raise typer.Exit(EXIT_FAIL_CLOSED) from exc
+
+
+@app.command()
+def forget(
+    memory_id: Annotated[str, typer.Argument()],
+    workspace: Annotated[str, typer.Option("--workspace")] = "default",
+    type_: Annotated[str, typer.Option("--type")] = "semantic",
+    reason: Annotated[
+        str | None, typer.Option("--reason", help="Recorded in the ledger. Avoid content.")
+    ] = None,
+    state: StateOpt = None,
+) -> None:
+    """Delete a memory. Suppression is immediate; success waits on replica quorum.
+
+    Exits 3 (pending) when quorum is unmet. That is not a failure — the deletion is
+    durable and the content is already unreachable — but it is not a completed
+    deletion either, and there is deliberately no flag that turns one into the other.
+    """
+    p = _paths(state)
+    _require_intact_ledgers(p)
+
+    replicator = _replicator(p)
+    result = deletion.forget(
+        p, memory_id, workspace=workspace, mtype=type_, reason=reason, replicate=replicator
+    )
+    conn = build.connect(p)
+    build.rebuild(p, conn)
+    conn.close()
+
+    emit(
+        {
+            "id": result.subject_id,
+            "suppressed": result.suppressed,
+            "delivery": result.delivery.value,
+            "replicas": f"{result.replicas}/{result.required}",
+            "removed": result.removed,
+            "residue": result.residue,
+        }
+    )
+    if result.residue:
+        err(
+            f"WARNING: bytes remain at {result.residue}. Retrieval is suppressed; run `brain sync`."
+        )
+        raise typer.Exit(EXIT_FAIL_CLOSED)
+    if not result.complete:
+        err(
+            f"DELETION PENDING — quorum unmet ({result.replicas}/{result.required} replicas). "
+            f"Retrieval is already suppressed and the content is removed locally. "
+            f"Run `brain sync` when a second replica is reachable."
+        )
+        raise typer.Exit(EXIT_PENDING)
+
+
+@app.command()
+def sync(state: StateOpt = None) -> None:
+    """Finish every incomplete deletion: re-scan for residue, retry replication.
+
+    Idempotent, and safe to run at any time. Every tombstoned subject is re-scanned
+    regardless of whether it already has a purge receipt — a receipt informs history,
+    it never shortens a scan.
+    """
+    p = _paths(state)
+    _require_intact_ledgers(p)
+    report = deletion.resume(p, replicate=_replicator(p))
+    pending = deletion.pending_deletions(p)
+    emit({**report, "still_pending": pending})
+    if report["residue"]:
+        raise typer.Exit(EXIT_FAIL_CLOSED)
+    if pending:
+        raise typer.Exit(EXIT_PENDING)
+
+
+def _replicator(p: config.Paths) -> deletion.Replicator:
+    """The configured off-device replica, or a null one that never fabricates quorum."""
+    from .store.replicate import GitLedgerReplicator
+
+    if p.ledger_git.exists():
+        r = GitLedgerReplicator(p)
+        if r.remote:
+            return r
+    return deletion.NullReplicator()
 
 
 @app.command()
