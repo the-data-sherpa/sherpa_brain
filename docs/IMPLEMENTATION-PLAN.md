@@ -1,6 +1,6 @@
 # Implementation Plan — Phase 0.5 + Phase 1
 
-**Status:** Revised after adversarial review round 4. Under review.
+**Status:** Revised after adversarial review round 8. Under review.
 **Date:** 2026-08-03
 **Governing document:** `BLUEPRINT.md`. Every item cites the section it implements. Choices the blueprint left open are marked **[P-n]**.
 **Scope:** Phase 0.5 (a working brain) + Phase 1 (durable foundation, deletion end-to-end). Phase 2+ out of scope, with named seams.
@@ -250,47 +250,53 @@ Round 4 claimed every state is "computed from the file tree, never stored — so
 
 In both, the tree cannot distinguish *"an operation was in flight"* from *"nothing was happening."* No ordering of writes creates that distinction, because the missing information is **intent**, and intent is not a property of data at rest.
 
-```json
-ops/<opid>.json     // written and fsync'd, plus fsync(ops/), BEFORE the exchange
-{ "memory_id": "...", "expected_predecessor": "<hash>",
-  "published_revision": 42, "present_tmp": "...", "phase": "pre-exchange" }
-```
-
-Recovery inspects `ops/` **first**, on every start:
+**Intent must precede every durable effect, not merely the exchange.** A first attempt at this fix still wrote the op record *after* publishing the revision — the giveaway was a `published_revision` field, which presupposes the revision already exists. That reproduces the original failure: crash between publishing `C` and writing the op, editor installs `B`, no op record exists, `B` reads as unwitnessed, `C` is buried.
 
 ```text
-for each op record:
-    if present_tmp holds bytes matching no known revision:
-        publish it (capture: reconciled)       # displaced branch NOT lost
-        write conflicts/<id>.json
-    if published_revision exists AND present matches neither it nor its predecessor:
-        -> divergence, not an unwitnessed edit
-    retire the op record LAST, only after settlement or conflict publication is durable
+1. stage body -> .staging/<opid>       fsync(file), fsync(.staging/)
+2. create ops/<opid>.json              fsync(file), fsync(ops/)   <- BEFORE any publish
+   { opid, memory_id, expected_predecessor, staging_path, phase: "staged" }
+3. publish revision via linkat, tagged with opid in its front matter
+4. exchange present
+5. retire op record                                               <- LAST
 ```
+
+**Correlation is by `opid`, never a preselected revision number.** A preselected `n` is a guess about a namespace another writer may claim first; `opid` is unique by construction and survives the retry `EEXIST` forces. The revision carries its `opid` so recovery can join in either direction.
 
 Retirement is last, so a crash during recovery replays the same recovery. Every step is idempotent.
 
-**`.staging/` and `present_tmp` are never GC'd while an op record references them.** The GC was the actual mechanism of loss in the first failure above, and it is now gated on op retirement.
+**`.staging/` is never GC'd while an op record references it — and GC is serialized against op creation by a store-level lock.** Gating on op retirement alone is insufficient: staging can be created and fsynced, GC can scan `ops/` before the op record lands, delete the staging file, and the writer then publishes an op referencing a file that no longer exists. A grace period narrows that window; it does not close it, because it is a race rather than a timing preference. GC takes the lock; op creation holds it across steps 1–2. No scan can observe the window between staging and its op record.
 
-#### 5.2.1 Classification is an ordered algorithm, not a set of predicates
+**Permanently stuck ops surface in `brain status` for explicit repair, never guessed away by GC.** An op whose staging is missing and whose revision was never published is a real inconsistency and must be reported. Tidying it silently is how the one branch that mattered gets lost.
 
-An earlier draft listed five "states" that were not mutually exclusive: a contested memory whose hashes happen to match reads as `SETTLED`, and a no-op write satisfies both `SETTLED` and `INTERRUPTED`.
+#### 5.2.1 Two passes, not one ordered list
+
+An earlier draft listed five "states" as one priority-ordered classifier. Two things were wrong. The predicates were not mutually exclusive (a contested memory whose hashes match reads as `SETTLED`; a no-op write satisfies both `SETTLED` and `INTERRUPTED`). And more seriously, the ordering **deadlocked**: with `CONTESTED` ahead of `RECOVERING`, a crash mid-resolution leaves both a conflict marker and a `phase: resolving` op, the classifier stops at `CONTESTED`, the op is never reached, and **resolution stalls forever.**
+
+The root error was collapsing *"what must I finish?"* and *"what may I serve?"* into one list. They are different questions and one strictly precedes the other:
 
 ```text
-classify(id):                                     # FIRST MATCH WINS
+PASS 1 — recover_pending_ops()      # unconditional; runs first; ignores
+  for each op in ops/:              # conflict and quarantine state entirely
+      complete or roll forward
+      retire the op record LAST
+
+PASS 2 — serving_disposition(id)    # only after pass 1 is clean
   1. QUARANTINED   present fails schema validation
-  2. CONTESTED     conflicts/<id>.json exists              -> reads FAIL CLOSED
-  3. RECOVERING    ops/*.json references id                -> run recovery first
-  4. INTERRUPTED   newest.predecessor_hash == hash(present)
-                   AND hash(present) != hash(newest)       # excludes no-ops
-  5. UNWITNESSED   hash(present) matches no revision
-  6. SETTLED       hash(present) == hash(newest)
-  7. otherwise     -> QUARANTINED   # unreachable by construction; fail closed, never guess
+  2. CONTESTED     conflicts/<id>.json exists       -> reads FAIL CLOSED
+  3. INTERRUPTED   newest.predecessor_hash == hash(present)
+                   AND hash(present) != hash(newest)   # excludes no-ops
+  4. UNWITNESSED   hash(present) matches no revision
+  5. SETTLED       hash(present) == hash(newest)
+  6. otherwise     -> QUARANTINED   # fail closed, never guess
 ```
 
-Ordering carries the safety: quarantine and contest dominate everything, and an in-flight operation is examined before any inference is drawn from hashes. Separately, **a write whose body equals present is a no-op that publishes no revision**, so it cannot manufacture the ambiguity in rule 4.
+`RECOVERING` disappears as a disposition — it was never a serving state, it was a phase of a different pass. Separately, **a write whose body equals present is a no-op that publishes no revision**, so it cannot manufacture the ambiguity in rule 3.
 
-**Proof obligation, discharged as a test rather than asserted:** an exhaustive generator enumerates reachable trees — present ∈ {absent, valid, invalid} × revisions ∈ {none, one, many} × op record {present, absent} × conflict {present, absent} — and asserts `classify` returns exactly one disposition for each, and that every disposition is reachable.
+**Two test suites, because enumeration proves the wrong thing.** Enumerating arbitrary file combinations proves `serving_disposition` is *total*, not that those trees are *reachable*, and totality over unreachable inputs is nearly worthless:
+
+1. **Transition tests generated from real syscall boundaries** — `os._exit` at each boundary of write, recover, and resolve, **with a concurrent direct rename injected at each boundary**. These exercise trees the protocol can actually produce.
+2. **A malformed-tree fuzzer**, separately, asserting the classifier never crashes and never yields two dispositions — robustness against corruption, stated as its own property rather than smuggled in as reachability.
 
 #### 5.3 Conflict visibility ships in this step
 
@@ -357,6 +363,15 @@ An ack records **exactly what was verified**, not that a command exited zero:
 
 **Broken-chain detection runs on all three ledgers, not only tombstones.** An unverified `acks.jsonl` would let a forged ack fabricate quorum, defeating the entire mechanism. Any broken chain in any ledger refuses to serve.
 
+Referential integrity rules on acks, without which a valid-looking chain still fabricates quorum:
+
+1. an ack **must resolve to an existing, exact local tombstone chain entry** — an unknown or non-matching `chain_head` is invalid, not merely unhelpful;
+2. **quorum counts distinct replica identities**, never ack-entry count;
+3. **replayed or duplicate acks do not inflate quorum** — deduplicated on `(replica_identity, seq, chain_head)`;
+4. **restore revalidates current remote containment** rather than trusting a historical ack, since the remote may have moved since it was written.
+
+**Stated limitation:** an unkeyed hash chain detects corruption; it does **not** authenticate authorship. Anyone who can write the file can rewrite the chain consistently. Authorship rests on OS identity, filesystem permissions, and an authenticated `gh` — not on the chain. Signing would change this and is deliberately out of Phase 1.
+
 #### 7.2 Read gating lands here, not later
 
 Tombstone suppression must gate **every read path that exists at this point** — it cannot wait for the search step, or any path built before then would serve tombstoned content in the interval.
@@ -376,11 +391,14 @@ resolve(id, take=<rev>):
      (never rewrite history — the losing branch stays in the log permanently)
   3. materialize present via exchange
   4. fsync
-  5. retire conflicts/<id>.json      <- LAST, after resolution is fully durable
+  5. rename conflicts/<id>.json -> conflicts/.resolved/<id>.<opid>.json
+     (RENAME_NOREPLACE; fsync both directories)   <- LAST, after resolution is durable
   6. retire op record
 ```
 
-A crash anywhere leaves the memory `CONTESTED` with reads still failing closed — the safe direction. The conflict marker is the last thing retired, never the first.
+A crash anywhere leaves the memory `CONTESTED` with reads still failing closed — the safe direction. The marker is the last thing retired, never the first.
+
+**Retirement is an archive move, not a deletion.** Deleting the marker destroys the audit trail of the resolution and leaves recovery unable to distinguish "resolved" from "never contested." Archiving gives recovery a decidable third state: **resolved-marker + live op** means finish the resolution; **resolved-marker + settled revision** means retire the op. Neither is inferable once the marker is simply gone.
 
 **Tests, one per documented failure mode:**
 - stale `direct-user-statement` does **not** beat a fresh `verified-environment-outcome` on a `volatile` fact (Postgres→MySQL)
@@ -423,7 +441,15 @@ brain forget <id>
 
 **There is no `--force-local`.** An earlier draft had one; it cannot both exit success and honour "not a completed deletion without quorum." Removed rather than weakened.
 
-**A purge receipt appended before the unlink is durable** means the system believes bytes are gone while they survive indefinitely — the deletion property failing silently, which is the worst version of this bug. Verification is a re-stat, never an assumption that `unlink` returning 0 was sufficient.
+**A purge receipt appended before the unlink is durable** means the system believes bytes are gone while they survive indefinitely — the deletion property failing silently. Verification is a re-stat, never an assumption that `unlink` returning 0 was sufficient.
+
+But verify-then-append **still races** an editor recreating the path between the re-stat and the append, and no lock fixes that, because a file can also be restored from outside the process entirely. The receipt's *meaning* is what has to change:
+
+> **A purge receipt is a point-in-time observation, not an enduring fact.**
+
+Every scan, backup, and restore **revalidates physical absence for every tombstoned ID** and never trusts a prior receipt. A file reappearing under a tombstoned path is re-purged and the reappearance logged as an anomaly. This is strictly stronger than locking, since it also covers restoration by any means the process never saw.
+
+The privacy property is unaffected throughout: the tombstone suppresses retrieval regardless of physical state.
 
 #### 10.1 Purge and replication are resumable
 
@@ -496,6 +522,21 @@ Phase 1 creates two things needing human resolution — divergences (§6.5) and 
 | PostgreSQL | Single writer, single human | measured |
 | Cursor / OpenCode / Aider | §2.2 non-goal | on breakage |
 | Automatic entity resolution | §2.2 non-goal | never at this scale |
+
+---
+
+## 4.5 A review lesson worth carrying into the code
+
+Across eight rounds, four separate blocking findings were the same mistake:
+
+| Finding | The step that was one position too late |
+|---|---|
+| Intent record | written *after* the revision was published |
+| Staging GC | not serialized against op *creation* |
+| Purge receipt | appended after verification, but treated as enduring |
+| Conflict marker | deleted rather than archived |
+
+**I repeatedly placed a durability or ordering step one position later than the failure it was meant to prevent.** Each fix looked correct in isolation and reintroduced a narrower version of the original bug. Named here because it will recur while writing the code if it is not: *for any durable effect, ask what a crash immediately before it would make indistinguishable — and put the marker there instead.*
 
 ---
 
