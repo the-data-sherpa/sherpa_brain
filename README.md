@@ -59,8 +59,14 @@ reported, never guessed at.
 mark the memory contested — reads fail closed until `brain conflicts resolve`. The losing
 branch stays in the log permanently, because a resolution is a decision, not an erasure.
 
-**Still to come:** events and artifacts, backup/restore commands, the MCP server and
-adapters, and export/eval. 55 tests pass.
+**Agents reach it over MCP.** Four tools — `brain.search`, `brain.get`, `brain.write`,
+`brain.forget` — because every tool description is a fixed tax on every request for the
+whole session. `forget` is deliberately its own tool: a destructive operation should
+never be reachable by mistyping an enum on a general one. Generated adapter files carry
+**pointers only**, enforced by a check that runs at generation and again at write.
+
+**Still to come:** events and artifacts, backup/restore commands, and the eval runner.
+108 tests pass.
 
 See [`docs/IMPLEMENTATION-PLAN.md`](docs/IMPLEMENTATION-PLAN.md) §5.6 for the step-by-step status.
 

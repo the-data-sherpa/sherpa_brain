@@ -21,7 +21,9 @@ from typing import Annotated
 
 import typer
 
+from . import adapters as adapters_mod
 from . import config, scan
+from . import export as export_mod
 from .frontmatter import InvalidFrontmatter, parse, serialize
 from .ids import new_ulid
 from .index import build
@@ -486,6 +488,42 @@ def reconcile_cmd(state: StateOpt = None) -> None:
         build.rebuild(p, conn)
         conn.close()
     emit({"captured": captured, "deferred": deferred})
+
+
+@app.command()
+def export(
+    dest: Annotated[str, typer.Argument(help="Destination directory.")],
+    fmt: Annotated[str, typer.Option("--format", help="markdown|jsonl|both")] = "both",
+    state: StateOpt = None,
+) -> None:
+    """Export the whole corpus. Tombstoned subjects are never included."""
+    p = _paths(state)
+    _require_intact_ledgers(p)
+    out = Path(dest)
+    result: dict[str, object] = {}
+    if fmt in ("markdown", "both"):
+        result["markdown"] = export_mod.export_markdown(p, out)
+    if fmt in ("jsonl", "both"):
+        result["jsonl"] = export_mod.export_jsonl(p, out / "memories.jsonl")
+    emit({"dest": str(out), **result})
+
+
+@app.command()
+def adapter(
+    target: Annotated[str, typer.Argument(help="claude|codex")],
+    repo: Annotated[str, typer.Option("--repo", help="Repository root.")] = ".",
+    dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
+    state: StateOpt = None,
+) -> None:
+    """Generate harness wiring. Pointers only — never memory content (§11.3)."""
+    p = _paths(state)
+    try:
+        generated = adapters_mod.generate(p, target, Path(repo))
+        written = adapters_mod.write(generated, dry_run=dry_run)
+    except (ValueError, adapters_mod.AdapterPurityError) as exc:
+        err(str(exc))
+        raise typer.Exit(EXIT_INVALID) from exc
+    emit({"target": target, "files": written, "dry_run": dry_run})
 
 
 @app.command()

@@ -610,17 +610,17 @@ Updated as steps land. A step is "done" only when its tests pass, not when its c
 | 2 — model / front matter / scanner / quarantine | **done** | Fail-closed parsing; credential scanner rejects, never redacts |
 | 3 — events / artifacts | **not started** | Evidence pointers currently resolve to opaque refs |
 | 4 — derived index | **done** | Three enforcement tests, incl. derivability under shuffled scan order |
-| 5 — write protocol + op lifecycle + recovery + conflicts CLI | **partial** | Protocol, intent records, divergence, `conflicts list/show` done. **Crash fault-injection tests not written.** |
+| 5 — write protocol + op lifecycle + recovery + conflicts CLI | **done** | Protocol, intent records, divergence, recovery, `conflicts list/show`. Crash fault injection at every boundary, verified to actually fire |
 | 6 — reconciliation (stable-read) | **done** | Pull-based with stable-read verification; defers on flux and editor sidecars; stamps `capture: reconciled` with an interval |
 | 7 — tombstones / acks / purges | **done** | Three hash-chained ledgers; broken chain refuses to serve; quorum counts distinct replica identities |
 | 8 — resolution ordering | **done** | Op record first, marker archived last via `RENAME_NOREPLACE`; losing branch retained |
 | 9 — search behind the boundary | **done** | Rungs 0 and 1; workspace scoping defaults to deny |
 | 10 — deletion / purge | **done** | Suppression immediate and unconditional; quorum gates only the receipt; resumable. Backup/restore commands still to come |
 | 11 — resolution UX | **done** | `conflicts resolve` and `reconcile` land here; read-only half shipped earlier |
-| 12 — MCP + adapters | **not started** | — |
-| 13 — export + eval | **not started** | — |
+| 12 — MCP + adapters | **done** | Four tools on MCP SDK 2.0; enum values in the wire schema via `Literal`. Adapters for Claude Code and Codex with the §11.3 purity check enforced at generation *and* at write |
+| 13 — export + eval | **partial** | `brain export` (markdown + JSONL, tombstoned subjects excluded, ledgers included) and the statistics that gate the migration trigger. **The eval runner and `bootstrap` are not built** |
 
-**What works today:** `init`, `remember`, `search`, `get`, `forget`, `sync`, `reconcile`, `reindex`, `validate`, `status`, `recover`, `conflicts list/show/resolve`, `quarantine list`. **55 tests passing.**
+**What works today:** `init`, `remember`, `search`, `get`, `forget`, `sync`, `reconcile`, `reindex`, `validate`, `status`, `recover`, `export`, `adapter`, `conflicts list/show/resolve`, `quarantine list`, plus the MCP server. **108 tests passing.**
 
 **Deletion works end to end**, including the headline test: back up, delete, restore the pre-deletion backup, and the content does not come back — because the ledger lives outside the restored domain.
 
@@ -628,7 +628,9 @@ Updated as steps land. A step is "done" only when its tests pass, not when its c
 
 **A second leak smoke tests caught that unit tests did not.** A reconciled revision recorded `capture: mediated` by default — losing exactly the distinction the field exists to make, between a transition the write protocol witnessed and one it is inferring after the fact. Reconciliation now stamps `capture: reconciled` plus the interval onto the bytes before publishing. Both of this phase's real defects were found by running the thing, not by testing it.
 
-**Still missing:** events/artifacts (Step 3), backup/restore commands (Step 10 remainder), MCP + adapters (Step 12), export + eval (Step 13), and crash fault-injection tests for Step 5.
+**Still missing:** events and artifacts (Step 3), backup/restore commands (Step 10 remainder), and the eval runner plus `eval bootstrap` (Step 13 remainder).
+
+The eval gap is the one that matters, and it is worth naming precisely: the *statistics* that gate the migration trigger are built and tested — including the refusal to compute a slope below 150 items, which is the defect the review caught. What is missing is the runner that produces the measurements, and it is missing because it needs a real golden set, which needs a real corpus. Building a runner against an empty set would produce exactly the falsely-precise number §10.1 exists to prevent.
 
 ---
 
