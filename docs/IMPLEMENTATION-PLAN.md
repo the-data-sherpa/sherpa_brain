@@ -1,11 +1,11 @@
 # Implementation Plan — Phase 0.5 + Phase 1
 
-**Status:** Revised after adversarial review round 8. Under review.
+**Status:** Revised after adversarial review round 10. Under review.
 **Date:** 2026-08-03
 **Governing document:** `BLUEPRINT.md`. Every item cites the section it implements. Choices the blueprint left open are marked **[P-n]**.
 **Scope:** Phase 0.5 (a working brain) + Phase 1 (durable foundation, deletion end-to-end). Phase 2+ out of scope, with named seams.
 
-> **Review note.** Four rounds of adversarial review found 13 defects here, five blocking — and **five defects in `BLUEPRINT.md` itself** that ten rounds of design review had missed. Writing the protocol as code found what reading the design could not. Review also *refuted two of my own fixes*: the `RENAME_EXCHANGE` rollback (§0.4) and `O_EXCL` revision allocation (Step 5.1) both reintroduced the loss they were meant to prevent. Corrections are folded in here and back into the blueprint (Appendix B, V11–V20).
+> **Review note.** Ten rounds of adversarial review found 27 defects here — and **seventeen defects in `BLUEPRINT.md` itself** that ten prior rounds of design review had missed. Writing the protocol as code found what reading the design could not. Review also *refuted four of my own fixes*, each of which reintroduced a narrower version of the bug it was meant to close: the `RENAME_EXCHANGE` rollback (§0.4), `O_EXCL` revision allocation (Step 5.1), intent recorded after publication (Step 5.2), and a single classifier that deadlocked recovery (Step 5.2.1). Corrections are folded in here and back into the blueprint (Appendix B, V11–V27). §4.5 names the pattern behind all four.
 
 ---
 
@@ -44,7 +44,7 @@ Open questions in `BLUEPRINT.md` §19, or absent from it entirely. Settled; not 
 
 Corrected in the blueprint and adopted here: **revisions are the append-only log of every committed state; the present file is a materialized view of the newest.** After a mediated write the two are byte-identical, so a difference between them is real information.
 
-Four more followed, all recorded as V16–V20: the unachievable divergence guarantee (§0.4), `O_EXCL` on the final revision path, a mutable `quorum_state` on a hash-chained record, and unenforceable git-side ledger protection.
+Sixteen more followed, recorded as V12–V27: the unachievable divergence guarantee (§0.4), `O_EXCL` on the final revision path, a mutable `quorum_state` on a hash-chained record, unenforceable git-side ledger protection, intent recorded after publication, a classifier that deadlocked recovery, GC racing op creation, recovery racing a live writer, purge receipts treated as enduring facts, self-asserted replica identity, and conflict markers deleted rather than archived.
 
 ### 0.4 A requirement that had to be withdrawn, not implemented
 
@@ -142,9 +142,12 @@ Reordered twice after review. The first draft claimed "invariants hold at every 
 
 ```text
 0 ADRs -> 1 primitives+probe -> 2 model/frontmatter/scanner/quarantine-CLI
--> 3 events/artifacts -> 4 index -> 5 write protocol + conflicts CLI
--> 6 reconciliation -> 7 tombstones/acks/quorum -> 8 resolution -> 9 search
--> 10 deletion/purge/backup/restore -> 11 MCP+adapters -> 12 export+eval
+-> 3 events/artifacts -> 4 index
+-> 5 write protocol + op lifecycle + recovery + conflicts CLI
+-> 6 reconciliation -> 7 tombstones/acks/purges + read gating on ALL paths
+-> 8 resolution (crash-safe ordering) -> 9 search
+-> 10 deletion/purge/backup/restore -> 11 resolution UX
+-> 12 MCP+adapters -> 13 export+eval
 ```
 
 **Nothing depends forward.**
@@ -211,18 +214,30 @@ A conditional rollback is three operations, and the undo is itself a non-atomic 
 
 ```python
 def write(memory_id, new_body, expected_predecessor_hash):
-    publish_revision(memory_id, new_body, expected_predecessor_hash)  # Step 5.1
-    stage(present_tmp, new_body); fsync(present_tmp)
-    exchange(present_path, present_tmp)      # ONE atomic op. NEVER undone.
-    displaced = present_tmp                  # what was ACTUALLY there
+  with per_memory_lock(memory_id):               # held THROUGH op retirement (§5.2)
+    opid   = new_opid()
+    staged = stage(f".staging/{opid}", new_body)      # fsync file + .staging/
+    with store_lock():                                # serializes GC vs op creation
+        create_op(opid, memory_id, expected_predecessor_hash,
+                  staged, phase="staged")             # fsync file + ops/
+        # ^^ INTENT DURABLE BEFORE ANY OTHER DURABLE EFFECT
+
+    publish_revision(staged, memory_id, opid)         # linkat; EEXIST -> n += 1
+    exchange(present_path(memory_id), staged)         # ONE atomic op. NEVER undone.
+
+    displaced = staged                                # what was ACTUALLY present
     if hash(displaced) == expected_predecessor_hash:
-        commit(); discard(present_tmp)       # displaced is already revision n
+        commit()
     else:
         publish_revision(displaced, capture="reconciled")   # the edit is NOT lost
         write_conflict_record(memory_id, branches=[...])
-        mark_contested(memory_id)            # ALL reads -> unresolved_conflict
-    fsync_dir(); index.upsert(memory_id)
+        mark_contested(memory_id)                     # ALL reads -> unresolved_conflict
+    fsync_dir()
+    retire_op(opid)                                   # LAST
+  index.upsert(memory_id)                             # derived; repairable
 ```
+
+Two orderings in this are load-bearing and were each wrong in an earlier draft: **intent is created before any other durable effect** (a draft published the revision first, which buries a committed branch when an editor writes during the crash window), and **the per-memory lock spans staging through retirement** so recovery cannot take over an op a live writer still owns.
 
 Present may hold either branch after a divergence. That is acceptable because **present is not authoritative while contested** — reads fail closed rather than returning it (§7.5, invariant 10).
 
@@ -265,6 +280,8 @@ In both, the tree cannot distinguish *"an operation was in flight"* from *"nothi
 
 Retirement is last, so a crash during recovery replays the same recovery. Every step is idempotent.
 
+**Recovery and a live writer must be mutually exclusive, and this needs a second lock — not the store lock.** An op record becomes visible the moment it is created, which is *before* publication by design. A recovery pass processing every visible op unconditionally would therefore race the writer that owns it, both acting on the same op. So the writer **holds a per-memory lock from staging through op retirement**, and recovery **acquires that same lock** before taking over any op. The store-level lock below covers only staging-versus-GC — a different lock with a different job, and conflating the two leaves this race open.
+
 **`.staging/` is never GC'd while an op record references it — and GC is serialized against op creation by a store-level lock.** Gating on op retirement alone is insufficient: staging can be created and fsynced, GC can scan `ops/` before the op record lands, delete the staging file, and the writer then publishes an op referencing a file that no longer exists. A grace period narrows that window; it does not close it, because it is a race rather than a timing preference. GC takes the lock; op creation holds it across steps 1–2. No scan can observe the window between staging and its op record.
 
 **Permanently stuck ops surface in `brain status` for explicit repair, never guessed away by GC.** An op whose staging is missing and whose revision was never published is a real inconsistency and must be reported. Tidying it silently is how the one branch that mattered gets lost.
@@ -278,6 +295,7 @@ The root error was collapsing *"what must I finish?"* and *"what may I serve?"* 
 ```text
 PASS 1 — recover_pending_ops()      # unconditional; runs first; ignores
   for each op in ops/:              # conflict and quarantine state entirely
+      ACQUIRE the SAME per-memory lock the writer holds
       complete or roll forward
       retire the op record LAST
 
@@ -298,9 +316,9 @@ PASS 2 — serving_disposition(id)    # only after pass 1 is clean
 1. **Transition tests generated from real syscall boundaries** — `os._exit` at each boundary of write, recover, and resolve, **with a concurrent direct rename injected at each boundary**. These exercise trees the protocol can actually produce.
 2. **A malformed-tree fuzzer**, separately, asserting the classifier never crashes and never yields two dispositions — robustness against corruption, stated as its own property rather than smuggled in as reachability.
 
-#### 5.3 Conflict visibility ships in this step
+#### 5.3 Conflict visibility ships in this step, not in Step 11
 
-Divergence recorded but invisible violates invariant 10. `brain conflicts list` and `brain conflicts show` land **with** the write protocol. Resolution UX can come later; visibility cannot.
+Divergence recorded but invisible violates invariant 10 for as long as the gap lasts. `brain conflicts list` and `brain conflicts show` therefore land **with** the write protocol, in this step — read-only. The mutating `resolve` lands in Step 11, because it needs Step 8's crash-safe ordering. Visibility cannot wait; resolution can.
 
 - Per-memory advisory lock for mediated writes. **CAS is the safety mechanism; the lock only reduces contention**, because direct editors ignore advisory locks.
 
@@ -358,7 +376,9 @@ An ack records **exactly what was verified**, not that a command exited zero:
 
 ```json
 { "seq": 41, "chain_head": "<hash>", "remote_sha": "<sha>",
-  "ref": "refs/heads/ledger", "protection_verified": true, "verified_at": "..." }
+  "ref": "refs/heads/ledger", "protection_verified": true,
+  "replica_identity": "<derived from configured endpoint; bound into the checksum>",
+  "verified_at": "..." }
 ```
 
 **Broken-chain detection runs on all three ledgers, not only tombstones.** An unverified `acks.jsonl` would let a forged ack fabricate quorum, defeating the entire mechanism. Any broken chain in any ledger refuses to serve.
@@ -366,7 +386,7 @@ An ack records **exactly what was verified**, not that a command exited zero:
 Referential integrity rules on acks, without which a valid-looking chain still fabricates quorum:
 
 1. an ack **must resolve to an existing, exact local tombstone chain entry** — an unknown or non-matching `chain_head` is invalid, not merely unhelpful;
-2. **quorum counts distinct replica identities**, never ack-entry count;
+2. **quorum counts distinct replica identities**, never ack-entry count — and **identity is derived from the configured authenticated endpoint, never read from a field in the ack**. A self-asserted identity is satisfiable by a duplicate endpoint or a fabricated value; it is bound into the ack's checksum at write time by the code that performed the verified push;
 3. **replayed or duplicate acks do not inflate quorum** — deduplicated on `(replica_identity, seq, chain_head)`;
 4. **restore revalidates current remote containment** rather than trusting a historical ack, since the remote may have moved since it was written.
 
@@ -458,9 +478,13 @@ Crash windows are real: tombstone-but-no-push, and ack-but-no-purge, both leave 
 ```text
 on startup and on `brain sync`:
   tombstones lacking an ack   -> retry replication (idempotent)
-  tombstones lacking a purge  -> re-run physical purge (idempotent)
-brain status -> lists both backlogs
+  EVERY tombstoned subject    -> re-scan for physical residue, REGARDLESS of
+                                 purge_state; re-purge anything found and log
+                                 the reappearance as an anomaly
+brain status -> lists replication backlog and any residue found
 ```
+
+**A receipt must never gate scan eligibility.** An earlier draft resumed only "tombstones lacking a purge", which skips exactly the IDs whose bytes could have been recreated *after* the receipt was written — silently reintroducing the residue the receipt claims is gone. A receipt informs history; it never shortens a scan.
 
 Suppression never depends on either backlog being empty — it is gated only on the local tombstone being durable. **A crash mid-deletion is therefore always safe**: the content is already unreachable, and residue is cleaned on the next run.
 
@@ -479,11 +503,17 @@ Suppression never depends on either backlog being empty — it is gated only on 
 - double-collection retries on concurrent modification, fails closed after N
 - snapshot path degrades cleanly when sudo is refused
 
-### Step 11 — Conflict and quarantine CLI **[P-2, revised]**
+### Step 11 — Resolution UX **[P-2, revised]**
 
-Phase 1 creates two things needing human resolution — divergences (§6.5) and quarantined files (§7.6) — and invariant 10 requires them surfaced. It does not require a TUI to do that.
+**Visibility already shipped in Steps 2 and 5**, because invariant 10 is violated the moment a divergence or quarantine can exist without an operator surface — and both can exist from the step that creates them. Deferring the whole CLI to here left contested state unsurfaced across Steps 5–10, which is a real forward dependency, not a documentation slip:
 
-`brain conflicts` (list; show both branches with a diff; `resolve --take <rev>`) and `brain quarantine` (list; show the validation error; `repair`). §8.2's criteria bind what exists: diff shown before any decision, **no bulk-resolve**.
+| Surface | Ships in | Why there |
+|---|---|---|
+| `brain quarantine list/show`, `brain validate` nonzero | **Step 2** | quarantine becomes possible the moment schema validation exists |
+| `brain conflicts list/show` | **Step 5** | divergence becomes possible the moment the write protocol exists |
+| `brain conflicts resolve --take <rev>`, `brain quarantine repair` | Step 11 | resolution is a *mutation* and needs Step 8's crash-safe ordering |
+
+So this step adds only the mutating half. §8.2's criteria bind what exists: the diff is shown before any decision, and there is **no bulk-resolve**. The TUI and the proposal queue remain Phase 2, when something generates proposals.
 
 ### Step 12 — MCP server and adapters (§12.1, §11.3)
 

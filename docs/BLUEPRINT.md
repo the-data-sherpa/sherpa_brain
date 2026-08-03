@@ -21,7 +21,7 @@ Where all three documents agreed, the conclusion is stated once and not re-argue
 
 Three decisions here differ from **all** of the prior documents. They are flagged **[NEW]** and are the ones most worth reviewing: **[D-1]** (§6.2, the erasability line), **[D-4]** (§6.3, files canonical everywhere, zero canonical data in SQLite), and **[D-27]** (§18, build-versus-adopt and the project kill criterion).
 
-**This document has been through adversarial review.** It was attacked over fourteen rounds by an independent reviewer (Codex/GPT-5) under a protocol requiring each side to state a position, argue it, and either concede or refute — not merely exchange comments. Forty-three findings were raised and every one was resolved. The review changed the architecture materially: it produced the revised **[D-4]**, the write protocol in **§6.5**, the trust-tier gate in **§7.5**, and the currency limitation in **§11.5.3**. Two of the defects it caught were regressions introduced *during* the review by earlier attempts at a fix, not pre-existing flaws. **Appendix B records the full log**, including the positions that were wrong, because a design's failed attempts are more useful to the next reader than a clean surface.
+**This document has been through adversarial review.** It was attacked over twenty rounds by an independent reviewer (Codex/GPT-5) under a protocol requiring each side to state a position, argue it, and either concede or refute — not merely exchange comments. Fifty findings were raised and every one was resolved. The review changed the architecture materially: it produced the revised **[D-4]**, the write protocol in **§6.5**, the trust-tier gate in **§7.5**, and the currency limitation in **§11.5.3**. Two of the defects it caught were regressions introduced *during* the review by earlier attempts at a fix, not pre-existing flaws. **Appendix B records the full log**, including the positions that were wrong, because a design's failed attempts are more useful to the next reader than a clean surface.
 
 ---
 
@@ -204,22 +204,33 @@ Events are erasable on the same terms as everything else — **by redaction fork
 Because SQLite is derived, there is no distributed transaction here — only durable ordering and idempotent replay. Every mutation follows one sequence:
 
 ```text
-0. allocate revision n+1 with O_CREAT|O_EXCL  — never rename over a revision
-   record predecessor_hash = what the caller believed it was editing
-1. write new body -> .revisions/<id>/<n+1>.md   fsync(file), fsync(dir)
-2. stage new body -> <id>.md.new                fsync
-   renameat2(<id>.md, <id>.md.new, RENAME_EXCHANGE)   — ATOMIC SWAP
-   h = hash(<id>.md.new)   # whatever was ACTUALLY present at the swap instant
-     h == predecessor_hash -> commit; discard the staged copy
-     h != predecessor_hash -> swap back; record h as capture: reconciled;
-                              raise DIVERGENCE; present unchanged
-   fsync(dir)
-3. update the SQLite index                                          (WAL)
+1. stage new body -> .staging/<opid>       fsync(file), fsync(.staging/)
+2. create ops/<opid>.json                  fsync(file), fsync(ops/)
+     { opid, memory_id, expected_predecessor, staging_path, phase: "staged" }
+     ^ INTENT IS DURABLE BEFORE ANY OTHER DURABLE EFFECT
+3. publish revision: linkat(.staging/<opid> -> .revisions/<id>/<n>.md)
+     EEXIST -> n += 1 and retry.  Never renames over a revision.
+     fsync(.revisions/<id>/)
+4. exchange present: renameat2(<id>.md, <staged copy>, RENAME_EXCHANGE)
+     displaced = the staged path now holds whatever was ACTUALLY present
+     displaced == expected_predecessor -> commit
+     displaced != expected_predecessor -> publish displaced (capture: reconciled)
+                                          write conflicts/<id>.json
+                                          mark CONTESTED; reads fail closed
+     NEVER swap back.  fsync(dir)
+5. retire ops/<opid>.json                                            <- LAST
+6. update the SQLite index                                           (derived)
 
-crash at any point -> `brain reindex` from files. Always valid, always terminating.
+crash at any point -> recover_pending_ops(), then `brain reindex`. Idempotent.
 ```
 
-Two properties of step 2 are load-bearing, and a plain `rename` has neither.
+Three properties of this sequence are load-bearing. Earlier drafts had none of them.
+
+**Intent must be durable before every other durable effect.** A draft that wrote the op record after publishing the revision reproduced the very bug it was added to fix: crash between publishing `C` and recording intent, an editor installs `B`, and with no op record `B` reads as an unwitnessed edit while `C` is silently buried. Correlation is by `opid`, never a preselected revision number — a preselected `n` is a guess about a namespace another writer may claim first.
+
+**There is no swap-back.** A draft attempted "exchange, inspect, and undo on mismatch." That is three operations, and the undo is itself a non-atomic read-modify-write that clobbers the next editor write — it *creates* the loss it was meant to prevent. See the divergence rule below.
+
+**Revisions are published by `linkat`, never allocated with `O_CREAT|O_EXCL` on the final path.** Creating the final path directly means a crash mid-write leaves a torn file **permanently occupying that revision number** — worse than the overwrite it was meant to prevent, because the number can never be reused. `linkat` publishes a file that is already complete and already fsynced.
 
 **The displaced bytes must be captured at the instant of displacement, not read beforehand.** A design that hashes the present file, then later renames over it, loses any write that lands in between — no crash required:
 
@@ -230,11 +241,21 @@ present=A -> writer reads/hashes A, CAS ok -> editor renames B over present
 
 `RENAME_EXCHANGE` closes this: the swap hands us whatever was actually there, so an unwitnessed edit ends up in our hands instead of under a name we are about to overwrite. Where the syscall is unavailable, the fallback's residual window is documented and asserted in a test rather than left implicit.
 
-**Revisions are allocated exclusively, never renamed over.** `rename()` silently overwrites, so a crash-retry or a concurrent allocator could destroy immutable history using the very mechanism meant to preserve it — invariant §5.1, violated from the inside. `O_CREAT|O_EXCL` makes that impossible. Gaps in the sequence are legal and mean an abandoned allocation.
+**Revisions are never renamed over, and never created in place.** `rename()` silently overwrites, so a crash-retry or a concurrent allocator could destroy immutable history using the very mechanism meant to preserve it — invariant §5.1, violated from the inside. But `O_CREAT|O_EXCL` on the *final path* is not the answer either: it leaves a torn file permanently occupying a revision number after a crash mid-write, which is worse, because the number can never be reused. `linkat` from an already-complete, already-fsynced staging file has neither failure. `EEXIST` means the number was claimed; increment and retry. Gaps are legal and mean an abandoned allocation.
 
-History is durable *before* present state changes. A crash between 1 and 2 leaves an orphan revision; between 2 and 3, a stale index that `reindex` repairs by definition. **No crash point loses canonical data.**
+Recovery by crash point:
 
-**Distinguishing an interrupted write from an unwitnessed edit.** Because the revision log includes the current state (§6.3), a crash between steps 1 and 2 leaves `hash(present) != hash(latest revision)` — which looks exactly like a direct edit. `predecessor_hash` decides it:
+| Crash between | State | Repair |
+|---|---|---|
+| 1 and 2 (staged, no intent) | orphan staging file | GC'd once no op references it |
+| 2 and 3 (intent, no revision) | pending op | `recover_pending_ops()` completes or rolls forward |
+| 3 and 4 (revision, not materialized) | `INTERRUPTED` | replay the exchange |
+| 4 and 5 (exchanged, op live) | pending op | recovery finishes and retires it |
+| 5 and 6 (retired, index stale) | stale index | `reindex` repairs by definition |
+
+**No crash point loses canonical data**, because intent is durable before every other durable effect and the op record is retired last.
+
+**Distinguishing an interrupted write from an unwitnessed edit.** Because the revision log includes the current state (§6.3), a crash after publication but before materialization leaves `hash(present) != hash(newest revision)` — which looks exactly like a direct edit. `predecessor_hash` decides it:
 
 ```text
 revision(n+1).predecessor_hash == hash(present) -> interrupted mediated write; replay step 2
@@ -359,11 +380,13 @@ brain/
 # Not git-tracked — mutable state, XDG.  CANONICAL = the files below.
 $XDG_STATE_HOME/brain/
 |-- memories/
-|   |-- <type>/<id>.md              # canonical: present state
-|   `-- .revisions/<id>/<n>.md      # canonical: prior states, append-only
+|   |-- <workspace>/<type>/<id>.md  # canonical: materialized view of newest revision
+|   `-- .revisions/<id>/<n>.md      # canonical: append-only log of EVERY committed state
 |-- events/YYYY-MM-DD.jsonl         # canonical: append-only event log
 |-- artifacts/sha256/ab/cd/<digest>/ # canonical: original evidence bytes
 |-- quarantine/                     # files failing schema validation (§7.6)
+|-- conflicts/<id>.json             # canonical: unresolved divergences (§6.5)
+|-- ops/<opid>.json                 # canonical: in-flight intent records (§6.5)
 |-- brain.sqlite3                   # DERIVED. Always safe to delete.
 `-- backups/
 
@@ -1315,7 +1338,7 @@ Stated because the brief was to avoid leaning on vendors, and because §4 rests 
 
 ## Appendix B — Adversarial Review Log
 
-Fourteen rounds against an independent reviewer (Codex/GPT-5). Protocol: each side states a position, argues it, and either concedes or refutes with a named failure — not comment exchange. Forty-three findings (16 G, 4 N, 3 O, 20 V), all resolved. Recorded because the failed attempts are the useful part.
+Twenty rounds against an independent reviewer (Codex/GPT-5). Protocol: each side states a position, argues it, and either concedes or refutes with a named failure — not comment exchange. Fifty findings (16 G, 4 N, 3 O, 27 V), all resolved. Entries are chronological, so an early fix may be superseded by a later one — where that happens it is marked. Recorded because the failed attempts are the useful part.
 
 ### What the review changed
 
@@ -1372,7 +1395,7 @@ Nine rounds of design review did not find these. Writing `IMPLEMENTATION-PLAN.md
 |---|---|---|
 | V11 | **The revision model was self-contradictory.** §6.3 described revisions as *prior* states; §6.6's unwitnessed-edit detector compares `hash(present)` to `hash(latest revision)` — which under that reading is unequal for every memory, always. §6.6 was unimplementable against §6.3. | Revisions are the append-only log of **every** committed state; present is a materialized view of the newest (§6.3). `predecessor_hash` distinguishes an interrupted write from a direct edit (§6.5) |
 | V12 | **The commit sequence lost concurrent edits with no crash involved.** Hashing the present file and later renaming over it destroys any write landing in between — a supported direct edit, silently gone | `renameat2(RENAME_EXCHANGE)` captures the displaced bytes at the instant of displacement (§6.5) |
-| V13 | **Revision files were written with `rename`, which overwrites.** A crash-retry could destroy immutable history using the mechanism meant to preserve it — invariant §5.1 violated from the inside | `O_CREAT\|O_EXCL` exclusive allocation; gaps legal, never reused (§6.5) |
+| V13 | **Revision files were written with `rename`, which overwrites.** A crash-retry could destroy immutable history using the mechanism meant to preserve it — invariant §5.1 violated from the inside | `O_CREAT\|O_EXCL` exclusive allocation — **superseded by V17**, which found this leaves a torn file permanently occupying a revision number |
 | V14 | **Deletion failed open.** "tombstone (quorum) → stop retrieval" left deleted content retrievable whenever the push failed or the machine was offline | Local durability gates suppression (immediate, unconditional); quorum gates only the receipt (§11.5) |
 | V15 | **A git remote was treated as a monotonic anchor.** Force-push, reset, and rollback were unaddressed, and the push was treated as the acknowledgement | Append-only protected refs; the ack is re-reading the remote ref; `(seq, chain_head, remote_sha)` anchored externally; equivocation fails closed (§11.5.3) |
 
@@ -1381,6 +1404,14 @@ Nine rounds of design review did not find these. Writing `IMPLEMENTATION-PLAN.md
 | V18 | **`quorum_state` was a mutable field on a hash-chained append-only record.** Flipping `pending→confirmed` rewrites a link in the chain whose purpose is tamper evidence | Delivery and purge status become **derived projections** over separate append-only ledgers, never mutations (§11.5.3) |
 | V19 | **`receive.denyNonFastForwards` is client-side config that GitHub ignores**, and pre-push hooks are locally bypassable. Neither protects the ledger | Branch-protection ruleset via API, verified at init; ack is re-reading the remote ref (§11.5.3) |
 | V20 | **A startup probe cannot prove crash durability.** `fsync()` returning success says nothing about lying disks or write caches | Probe checks capability only; conservative denylist retained; durability stated as **assumed, not proven** (§6.5.1) |
+
+| V21 | **Intent was recorded after the revision was published.** Crash between publication and the intent record, plus a direct edit, buries a committed branch silently | Intent is durable before every other durable effect; correlation by `opid`, not a preselected number (§6.5) |
+| V22 | **One ordered classifier conflated "what must I finish?" with "what may I serve?"** — and deadlocked: a crash mid-resolution left both a conflict marker and a live op, `CONTESTED` was checked first, and resolution stalled forever | Two passes: `recover_pending_ops()` unconditionally first, then `serving_disposition()` |
+| V23 | **Staging GC raced op creation** — GC could scan, delete staging, and leave the writer publishing an op that references nothing | Store-level lock serializes GC against op creation; stuck ops surface in `brain status`, never guessed away |
+| V24 | **Recovery had no mutual exclusion with a live writer.** Op records are visible before publication by design, so recovery could take over an op its owner was still executing | Writer holds a per-memory lock from staging through retirement; recovery acquires the same lock. Distinct from the store lock |
+| V25 | **A purge receipt was treated as an enduring fact.** Verify-then-append races recreation, and resumption skipped any ID that already had a receipt | Receipts are point-in-time observations; every scan revalidates absence for *every* tombstoned subject regardless of state |
+| V26 | **Quorum counted acks, and replica identity was a self-asserted field** — a duplicate endpoint or fabricated value satisfied it | Identity derived from the configured authenticated endpoint and bound into the checksum; replays deduplicated |
+| V27 | **Conflict markers were deleted on resolution**, destroying the audit trail and leaving recovery unable to distinguish resolved from never-contested | `RENAME_NOREPLACE` archive move to `conflicts/.resolved/`, both directories fsynced |
 
 V12 and V14 are the two that would have caused silent data loss in production — one destroying an edit the user had just made, the other continuing to serve content the user had asked to be deleted.
 
