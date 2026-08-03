@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import os
 import random
-import sqlite3
 import time
 from datetime import date
 
