@@ -49,8 +49,18 @@ unreplicated deletion exits `3` (pending), never `0`, and there is deliberately 
 that turns one into the other. Restoring a pre-deletion backup does not resurrect the
 content, because the tombstone ledger lives outside the restored domain. 41 tests pass.
 
-**Still to come:** events and artifacts, reconciliation of unwitnessed edits, conflict
-resolution, backup/restore commands, the MCP server and adapters, and export/eval.
+**Direct edits are supported, not merely tolerated.** Edit a memory file in vim or with
+an agent's `Edit` tool, then run `brain reconcile`: the edit is captured as a revision
+stamped `capture: reconciled` with a transaction-time *interval*, because nobody knows
+when an unwitnessed edit actually happened. Files still being written are deferred and
+reported, never guessed at.
+
+**Divergences require a human.** Two writes from one predecessor retain both branches and
+mark the memory contested — reads fail closed until `brain conflicts resolve`. The losing
+branch stays in the log permanently, because a resolution is a decision, not an erasure.
+
+**Still to come:** events and artifacts, backup/restore commands, the MCP server and
+adapters, and export/eval. 55 tests pass.
 
 See [`docs/IMPLEMENTATION-PLAN.md`](docs/IMPLEMENTATION-PLAN.md) §5.6 for the step-by-step status.
 

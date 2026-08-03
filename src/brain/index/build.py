@@ -141,11 +141,15 @@ def _load_revisions(conn: sqlite3.Connection, paths: Paths, tombstoned: set[str]
             # Every field below comes from the file. Nothing is invented here, or
             # the index would stop being a function of the tree.
             capture, opid, recorded = Capture.MEDIATED.value, None, ""
+            rec_from = rec_to = ""
             try:
                 meta, _ = split(data.decode("utf-8"))
                 capture = str(meta.get("capture", Capture.MEDIATED.value))
                 opid = meta.get("opid")
                 recorded = str(meta.get("recorded_at", ""))
+                # A reconciled revision carries an interval rather than a point.
+                rec_from = str(meta.get("recorded_from", recorded))
+                rec_to = str(meta.get("recorded_to", recorded))
             except (InvalidFrontmatter, UnicodeDecodeError):
                 pass
             conn.execute(
@@ -159,8 +163,8 @@ def _load_revisions(conn: sqlite3.Connection, paths: Paths, tombstoned: set[str]
                     content_hash(data),
                     None,
                     capture,
-                    recorded,
-                    recorded,
+                    rec_from,
+                    rec_to,
                     opid,
                 ),
             )

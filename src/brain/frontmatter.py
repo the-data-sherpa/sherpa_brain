@@ -151,7 +151,14 @@ def parse(text: str, path: Path | None = None) -> Memory:
         raise InvalidFrontmatter(exc.reason, path) from exc
 
 
-def serialize(memory: Memory, *, capture: Capture | None = None, opid: str | None = None) -> str:
+def serialize(
+    memory: Memory,
+    *,
+    capture: Capture | None = None,
+    opid: str | None = None,
+    recorded_from: str | None = None,
+    recorded_to: str | None = None,
+) -> str:
     """Render a memory back to a document. Field order is stable so diffs stay readable."""
     meta: dict[str, Any] = {
         "id": memory.id,
@@ -172,6 +179,11 @@ def serialize(memory: Memory, *, capture: Capture | None = None, opid: str | Non
         "sensitivity": memory.sensitivity,
         "capture": capture.value if capture else None,
         "opid": opid,
+        # For a reconciled revision these bound an unwitnessed transition. They are
+        # deliberately an interval: nobody knows when the edit happened, and a precise
+        # timestamp there would be a lie the audit trail then rests on.
+        "recorded_from": recorded_from,
+        "recorded_to": recorded_to,
         "recorded_at": iso(memory.recorded_at or utcnow()),
     }
     meta.update({k: v for k, v in optional.items() if v is not None})

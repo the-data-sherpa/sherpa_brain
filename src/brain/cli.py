@@ -28,8 +28,9 @@ from .index import build
 from .model import Evidence, Memory, MemoryType, ProvenanceClass, Volatility
 from .search.fts5 import Fts5Backend
 from .search.ripgrep import RipgrepBackend
-from .store import deletion, ledger, revisions
+from .store import deletion, ledger, reconcile, revisions
 from .store import memory as mem
+from .store import resolve as resolve_mod
 
 EXIT_OK, EXIT_EMPTY, EXIT_INVALID, EXIT_PENDING, EXIT_FAIL_CLOSED = 0, 1, 2, 3, 4
 
@@ -440,6 +441,51 @@ def _replicator(p: config.Paths) -> deletion.Replicator:
         if r.remote:
             return r
     return deletion.NullReplicator()
+
+
+@conflicts_app.command("resolve")
+def conflicts_resolve(
+    memory_id: Annotated[str, typer.Argument()],
+    take: Annotated[int, typer.Option("--take", help="Revision number to adopt.")],
+    workspace: Annotated[str, typer.Option("--workspace")] = "default",
+    type_: Annotated[str, typer.Option("--type")] = "semantic",
+    state: StateOpt = None,
+) -> None:
+    """Adopt one branch of a divergence. The losing branch stays in the log."""
+    p = _paths(state)
+    try:
+        result = resolve_mod.resolve(p, memory_id, take, workspace=workspace, mtype=type_)
+    except (resolve_mod.NotContested, resolve_mod.UnknownBranch) as exc:
+        err(str(exc))
+        raise typer.Exit(EXIT_INVALID) from exc
+    conn = build.connect(p)
+    build.rebuild(p, conn)
+    conn.close()
+    emit(
+        {
+            "id": result.memory_id,
+            "took": result.taken,
+            "new_revision": result.new_revision,
+            "archived_marker": result.archived_marker,
+        }
+    )
+
+
+@app.command("reconcile")
+def reconcile_cmd(state: StateOpt = None) -> None:
+    """Capture edits made outside the write protocol.
+
+    Files still being written are deferred and reported, never guessed at.
+    """
+    p = _paths(state)
+    results = reconcile.reconcile_all(p)
+    captured = [str(r) for r in results if isinstance(r, reconcile.Reconciled)]
+    deferred = [str(r) for r in results if isinstance(r, reconcile.Deferred)]
+    if captured:
+        conn = build.connect(p)
+        build.rebuild(p, conn)
+        conn.close()
+    emit({"captured": captured, "deferred": deferred})
 
 
 @app.command()

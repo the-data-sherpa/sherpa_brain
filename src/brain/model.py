@@ -134,7 +134,13 @@ def utcnow() -> datetime:
 
 
 def iso(dt: datetime) -> str:
-    return dt.astimezone(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
+    """ISO-8601 at millisecond precision.
+
+    Seconds is too coarse for an audit trail: the system can record several
+    revisions inside one second, and a transaction-time *interval* whose bounds
+    both round to the same value stops being an interval.
+    """
+    return dt.astimezone(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
 @dataclass(frozen=True)
