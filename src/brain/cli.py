@@ -22,6 +22,7 @@ from typing import Annotated
 import typer
 
 from . import adapters as adapters_mod
+from . import backup as backup_mod
 from . import config, scan
 from . import export as export_mod
 from .frontmatter import InvalidFrontmatter, parse, serialize
@@ -30,7 +31,7 @@ from .index import build
 from .model import Evidence, Memory, MemoryType, ProvenanceClass, Volatility
 from .search.fts5 import Fts5Backend
 from .search.ripgrep import RipgrepBackend
-from .store import deletion, ledger, reconcile, revisions
+from .store import artifacts, deletion, events, ledger, reconcile, revisions
 from .store import memory as mem
 from .store import resolve as resolve_mod
 
@@ -44,7 +45,11 @@ app = typer.Typer(
 conflicts_app = typer.Typer(no_args_is_help=True, help="Divergent writes awaiting a human.")
 quarantine_app = typer.Typer(no_args_is_help=True, help="Files that failed validation.")
 app.add_typer(conflicts_app, name="conflicts")
+eval_app = typer.Typer(no_args_is_help=True, help="The three evaluation instruments.")
+backup_app = typer.Typer(no_args_is_help=True, help="Verifiable backup and fail-closed restore.")
 app.add_typer(quarantine_app, name="quarantine")
+app.add_typer(eval_app, name="eval")
+app.add_typer(backup_app, name="backup")
 
 
 def err(msg: str) -> None:
@@ -524,6 +529,222 @@ def adapter(
         err(str(exc))
         raise typer.Exit(EXIT_INVALID) from exc
     emit({"target": target, "files": written, "dry_run": dry_run})
+
+
+@app.command()
+def ingest(
+    source: Annotated[str, typer.Argument(help="File path to preserve as evidence.")],
+    state: StateOpt = None,
+) -> None:
+    """Preserve a file as immutable, content-addressed evidence."""
+    p = _paths(state)
+    src = Path(source)
+    if not src.is_file():
+        err(f"{source}: not a file")
+        raise typer.Exit(EXIT_INVALID)
+    a = artifacts.import_file(p, src)
+    emit({"ref": a.ref, "digest": a.digest, "media_type": a.media_type, "size": a.size})
+
+
+@app.command()
+def record(
+    text: Annotated[str, typer.Argument(help="What happened.")],
+    kind: Annotated[str, typer.Option("--kind")] = "observation",
+    session: Annotated[str | None, typer.Option("--session")] = None,
+    state: StateOpt = None,
+) -> None:
+    """Append to the event log. The id is what evidence pointers reference."""
+    p = _paths(state)
+    try:
+        scan.assert_clean(text)
+    except scan.SecretFound as exc:
+        err(str(exc))
+        raise typer.Exit(EXIT_INVALID) from exc
+    e = events.append(p, kind, {"text": text}, session=session)
+    emit({"ref": f"event:{e.id}", "id": e.id, "occurred_at": e.occurred_at})
+
+
+@app.command()
+def evidence(
+    ref: Annotated[str, typer.Argument(help="event:<id> or artifact:<digest>")],
+    lines: Annotated[str | None, typer.Option("--lines", help="e.g. 4-8")] = None,
+    state: StateOpt = None,
+) -> None:
+    """Resolve an evidence pointer to the source text it names.
+
+    This is what makes evidence real rather than decorative — a pointer nobody can
+    follow is an attribution, not a citation.
+    """
+    p = _paths(state)
+    start = end = None
+    if lines:
+        a, _, b = lines.partition("-")
+        start, end = int(a), int(b or a)
+    resolved = artifacts.resolve_evidence(p, ref, start, end)
+    emit(resolved)
+    if not resolved.get("resolved"):
+        raise typer.Exit(EXIT_EMPTY)
+
+
+@backup_app.command("create")
+def backup_create(
+    dest: Annotated[str | None, typer.Option("--dest")] = None,
+    state: StateOpt = None,
+) -> None:
+    """Take a verifiable backup: snapshot if possible, validated collection otherwise."""
+    p = _paths(state)
+    try:
+        manifest = backup_mod.backup(p, Path(dest) if dest else None)
+    except backup_mod.BackupError as exc:
+        err(str(exc))
+        raise typer.Exit(EXIT_FAIL_CLOSED) from exc
+    emit(
+        {
+            "generation": manifest.generation,
+            "mechanism": manifest.mechanism,
+            "files": len(manifest.files),
+            "tombstone_seq": manifest.tombstone_seq,
+        }
+    )
+
+
+@backup_app.command("list")
+def backup_list(state: StateOpt = None) -> None:
+    """List backups and their tombstone high-water marks."""
+    p = _paths(state)
+    items = backup_mod.list_backups(p)
+    emit(items)
+    if not items:
+        raise typer.Exit(EXIT_EMPTY)
+
+
+@backup_app.command("verify")
+def backup_verify(
+    manifest: Annotated[str, typer.Argument()],
+    state: StateOpt = None,
+) -> None:
+    """Check a backup against its manifest."""
+    p = _paths(state)
+    bad = backup_mod.verify_backup(p, Path(manifest))
+    emit({"manifest": manifest, "mismatched": bad, "ok": not bad})
+    if bad:
+        raise typer.Exit(EXIT_FAIL_CLOSED)
+
+
+@backup_app.command("restore")
+def backup_restore(
+    manifest: Annotated[str, typer.Argument()],
+    replica: Annotated[
+        list[str] | None, typer.Option("--replica", help="Ledger replica path.")
+    ] = None,
+    attest_seq: Annotated[
+        int | None,
+        typer.Option("--attest-seq", help="Operator attestation of the current tombstone seq."),
+    ] = None,
+    state: StateOpt = None,
+) -> None:
+    """Restore, replay deletions, then serve. Refuses to serve if currency is unproven."""
+    p = _paths(state)
+    try:
+        report = backup_mod.restore(
+            p,
+            Path(manifest),
+            extra_replicas=[Path(r) for r in (replica or [])],
+            attested_seq=attest_seq,
+        )
+    except backup_mod.RestoreRefused as exc:
+        err(str(exc))
+        err(
+            "A backup cannot vouch for its own currency. Supply --replica with a "
+            "ledger outside the rollback domain, or --attest-seq to assert it yourself."
+        )
+        raise typer.Exit(EXIT_FAIL_CLOSED) from exc
+    except ledger.LedgerError as exc:
+        err(str(exc))
+        raise typer.Exit(EXIT_FAIL_CLOSED) from exc
+    emit(report)
+
+
+@eval_app.command("bootstrap")
+def eval_bootstrap(
+    eval_dir: Annotated[str, typer.Option("--dir")] = "eval",
+    state: StateOpt = None,
+) -> None:
+    """Draft golden-set candidates from your corpus. They are DRAFTS — rewrite them."""
+    from .eval import bootstrap as bootstrap_mod
+
+    p = _paths(state)
+    candidates = bootstrap_mod.draft(p)
+    written = bootstrap_mod.write_templates(Path(eval_dir), candidates)
+    emit({"drafted": len(candidates), **written})
+    err(
+        "Drafted questions use the memory's own words, so they test lexical matching "
+        "rather than recall. Rewrite each one the way you would actually ask it."
+    )
+
+
+@eval_app.command("run")
+def eval_run(
+    eval_dir: Annotated[str, typer.Option("--dir")] = "eval",
+    memory_off: Annotated[bool, typer.Option("--memory-off", help="The control arm.")] = False,
+    state: StateOpt = None,
+) -> None:
+    """Run the golden set. Reports an interval and n, never a bare score."""
+    from .eval import runner
+
+    p = _paths(state)
+    d = Path(eval_dir)
+    record = runner.run(p, d / "golden.yaml", memory_off=memory_off, results_dir=d / "results")
+    if record.score["total"] == 0:
+        err(f"no cases in {d / 'golden.yaml'} — run `brain eval bootstrap` first")
+        raise typer.Exit(EXIT_EMPTY)
+    emit(
+        {
+            "score": f"{record.score['point']:.1%} "
+            f"[{record.score['lower']:.1%}-{record.score['upper']:.1%}]",
+            "n": record.score["total"],
+            "corpus_size": record.corpus_size,
+            "memory_off": memory_off,
+            "taxonomy": record.taxonomy,
+            "failures": [r for r in record.results if not r["passed"]][:10],
+        }
+    )
+
+
+@eval_app.command("probe")
+def eval_probe(
+    eval_dir: Annotated[str, typer.Option("--dir")] = "eval",
+    state: StateOpt = None,
+) -> None:
+    """State-recovery probe: can the store reconstruct known-true facts, cold?"""
+    from .eval import runner
+
+    p = _paths(state)
+    result = runner.state_recovery(p, Path(eval_dir) / "state-facts.yaml")
+    emit(result)
+    if result["total"] == 0:
+        raise typer.Exit(EXIT_EMPTY)
+
+
+@eval_app.command("slope")
+def eval_slope(
+    eval_dir: Annotated[str, typer.Option("--dir")] = "eval",
+    state: StateOpt = None,
+) -> None:
+    """The tenure trigger. Refuses to compute below the item floor."""
+    from .eval import runner
+
+    v = runner.verdict(Path(eval_dir) / "results")
+    emit(
+        {
+            "computable": v.computable,
+            "triggered": v.triggered,
+            "decline_pp": v.decline_pp,
+            "reason": v.reason,
+        }
+    )
+    if v.triggered:
+        err("TRIGGER MET — this is a decision prompt, not an instruction. A human decides.")
 
 
 @app.command()
