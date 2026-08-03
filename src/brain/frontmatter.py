@@ -13,7 +13,7 @@ which from the user's side is indistinguishable from the brain having forgotten.
 from __future__ import annotations
 
 import hashlib
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -83,6 +83,23 @@ def _as_date(value: Any, field: str) -> date:
     raise InvalidFrontmatter(f"{field}: expected a date, got {type(value).__name__}")
 
 
+def _as_datetime(value: Any) -> datetime:
+    """Parse ``recorded_at`` from front matter. Falls back to the epoch, not to now.
+
+    Falling back to ``utcnow()`` would silently make every rebuild produce a
+    different index for the same tree.
+    """
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=UTC)
+    if isinstance(value, str):
+        try:
+            dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            return dt if dt.tzinfo else dt.replace(tzinfo=UTC)
+        except ValueError:
+            pass
+    return datetime.fromtimestamp(0, UTC)
+
+
 def _enum(cls: type, value: Any, field: str) -> Any:
     try:
         return cls(value)
@@ -125,6 +142,10 @@ def parse(text: str, path: Path | None = None) -> Memory:
             tags=[str(t) for t in meta.get("tags", [])],
             review_by=_as_date(meta["review_by"], "review_by") if meta.get("review_by") else None,
             sensitivity=meta.get("sensitivity"),
+            # Read from the file, never regenerated. A value invented at parse time
+            # would make the index non-deterministic across rebuilds, which is the
+            # one property the derivability test exists to protect.
+            recorded_at=_as_datetime(meta.get("recorded_at")),
         )
     except InvalidFrontmatter as exc:
         raise InvalidFrontmatter(exc.reason, path) from exc
