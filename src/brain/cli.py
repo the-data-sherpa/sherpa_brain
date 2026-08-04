@@ -66,6 +66,11 @@ def _paths(state: str | None) -> config.Paths:
     return config.paths(state)
 
 
+def _ws(explicit: str | None) -> str:
+    """An explicit --workspace, else the current git repo, else 'default'."""
+    return explicit or config.default_workspace()
+
+
 StateOpt = Annotated[str | None, typer.Option("--state", help="Override the state directory.")]
 JsonOpt = Annotated[bool, typer.Option("--json", help="Machine-readable output.")]
 
@@ -105,12 +110,17 @@ def remember(
     evidence: Annotated[
         list[str] | None, typer.Option("--evidence", help="event:… | artifact:…")
     ] = None,
-    workspace: Annotated[str, typer.Option("--workspace")] = "default",
+    workspace: Annotated[str | None, typer.Option("--workspace")] = None,
     tags: Annotated[list[str] | None, typer.Option("--tag")] = None,
     state: StateOpt = None,
 ) -> None:
-    """Write a memory. Explicit writes land confirmed."""
+    """Write a memory. Explicit writes land confirmed.
+
+    Without --workspace the memory lands in the workspace named after the current
+    git repository, so one project's decisions do not surface in another's.
+    """
     p = _paths(state)
+    workspace = _ws(workspace)
     try:
         scan.assert_clean(text)
     except scan.SecretFound as exc:
@@ -149,7 +159,7 @@ def remember(
 @app.command()
 def search(
     query: Annotated[str, typer.Argument()],
-    workspace: Annotated[str, typer.Option("--workspace")] = "default",
+    workspace: Annotated[str | None, typer.Option("--workspace")] = None,
     all_workspaces: Annotated[
         bool, typer.Option("--scope-all", help="Search every workspace.")
     ] = False,
@@ -163,7 +173,7 @@ def search(
     """Search memories. Scoped to the current workspace unless --scope-all."""
     p = _paths(state)
     _require_intact_ledgers(p)
-    ws = None if all_workspaces else workspace
+    ws = None if all_workspaces else _ws(workspace)
     backend = RipgrepBackend(p) if rung == 0 else Fts5Backend(p)
     hits = backend.search(query, workspace=ws, limit=limit, as_of=as_of)
 
@@ -905,6 +915,70 @@ def unexpire(
     build.rebuild(p, conn)
     conn.close()
     emit({"id": memory_id, "status": "confirmed"})
+
+
+@app.command()
+def context(
+    text: Annotated[str, typer.Argument(help="The prompt or task description.")],
+    workspace: Annotated[str | None, typer.Option("--workspace")] = None,
+    all_workspaces: Annotated[bool, typer.Option("--scope-all")] = False,
+    limit: Annotated[int, typer.Option("--limit")] = 5,
+    hook: Annotated[
+        bool, typer.Option("--hook", help="Plain text for a hook; silent when empty.")
+    ] = False,
+    state: StateOpt = None,
+) -> None:
+    """Pointers to memories related to some text. Never their content.
+
+    Built for a UserPromptSubmit hook, so it is fast, quiet, and cannot break a
+    session: any failure reports "nothing relevant" rather than raising.
+
+    It returns ids and titles, never bodies. Reading a memory still requires a
+    visible `brain.search` / `brain.get` call — the hook guarantees you always look,
+    the tool call is still how you read (§9.1, §11.6).
+    """
+    from . import workflow
+
+    p = _paths(state)
+    result = workflow.context(p, text, workspace=None if all_workspaces else workspace, limit=limit)
+    if hook:
+        if rendered := workflow.render_for_hook(result):
+            print(rendered)
+        return
+    emit(result)
+    if not result["relevant"]:
+        raise typer.Exit(EXIT_EMPTY)
+
+
+@app.command("capture-check")
+def capture_check(
+    hook: Annotated[
+        bool, typer.Option("--hook", help="Plain text for a hook; silent when quiet.")
+    ] = False,
+    window: Annotated[int, typer.Option("--window", help="Minutes to look back.")] = 240,
+    state: StateOpt = None,
+) -> None:
+    """Did this stretch of work produce something worth remembering, and was it captured?
+
+    Deliberately reluctant to nag. A prompt on every stop trains you to dismiss it,
+    at which point the reminder is worse than nothing.
+    """
+    from . import workflow
+
+    p = _paths(state)
+    check = workflow.capture_check(p, window_minutes=window)
+    if hook:
+        if check.should_prompt:
+            print(
+                "brain: this session changed files and wrote nothing to the brain.\n"
+                "  If something was learned that the next session would want — a "
+                "decision, a dead end, a constraint — capture it now with "
+                "brain.write or `brain remember`.\n"
+                "  If nothing was, say so and move on. Not every session teaches "
+                "something."
+            )
+        return
+    emit(check.as_dict())
 
 
 @app.command()

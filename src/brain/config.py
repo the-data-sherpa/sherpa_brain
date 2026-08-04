@@ -11,6 +11,7 @@ mechanisms, and neither alone is sufficient — see ``check_preconditions``.
 from __future__ import annotations
 
 import os
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -164,6 +165,36 @@ def state_root(override: str | os.PathLike[str] | None = None) -> Path:
 
 def paths(override: str | os.PathLike[str] | None = None) -> Paths:
     return Paths(state_root(override))
+
+
+def default_workspace(cwd: Path | None = None) -> str:
+    """The workspace to use when the caller did not name one.
+
+    One store, many projects — so without this, memories from every repository
+    land in ``default`` together and searches return whatever matched from
+    anywhere. That is context collapse (§11.6): the failure where your work
+    project bleeds into your side project because nothing ever separated them.
+
+    Derived from the git repository, because that is the boundary that already
+    means "a different thing I am working on". ``BRAIN_WORKSPACE`` overrides for
+    the cases where it is not.
+    """
+    if env := os.environ.get("BRAIN_WORKSPACE"):
+        return env.strip() or "default"
+    try:
+        proc = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+            cwd=cwd or Path.cwd(),
+        )
+        if proc.returncode == 0 and (root := proc.stdout.strip()):
+            return Path(root).name or "default"
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return "default"
 
 
 def fstype_of(path: Path) -> str | None:

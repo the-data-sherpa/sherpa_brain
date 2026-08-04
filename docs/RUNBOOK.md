@@ -68,6 +68,39 @@ v2.1.50 removed. CI enforces it.
 
 ---
 
+## 1.4 Wire it into the development loop
+
+The gap this closes: nothing is written unless you write it, and "remember to write
+it" is not a mechanism. Two hooks make consultation and capture structural.
+
+```bash
+brain install-timers                 # if you have not already
+# hooks live at ~/.claude/hooks/brain-{context,capture}.sh
+# wired in ~/.claude/settings.json under UserPromptSubmit and Stop
+```
+
+**Consult (UserPromptSubmit).** Every prompt is checked against the store. If related
+memories exist you get *pointers* — id, a truncated label, workspace — and an
+instruction to read them properly. Silent when nothing matches.
+
+It emits pointers rather than content on purpose. Auto-injecting memories would
+contradict three settled decisions: the agent pulls through a tool loop (§9.1), the
+prefix is not mutated per turn (§9.5), and memory used in an answer must be visible
+in that answer (§11.6). The hook guarantees you always *look*; a `brain.search` call
+is still how you *read*.
+
+**Capture (Stop).** Fires once per session, and only when the working tree changed
+*and* nothing was written to the store. Writing a memory clears the condition, so it
+cannot loop — and "nothing here was worth keeping" is a legitimate answer that ends
+the turn.
+
+**Workspaces are per repository.** `brain` derives the workspace from the git root, so
+your work project and your side project do not surface in each other's searches.
+Override with `BRAIN_WORKSPACE`, widen a single search with `--scope-all`.
+
+Both hooks fail open: if `brain` is missing, slow, or broken, they exit silently. A
+memory system that blocks your editor is one you will turn off.
+
 ## 2. Daily and weekly
 
 | Cadence | Command | Why |

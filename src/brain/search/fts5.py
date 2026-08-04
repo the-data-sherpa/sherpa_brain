@@ -20,16 +20,32 @@ from .base import Hit, SearchBackend
 _FTS_SPECIAL = str.maketrans({c: " " for c in '"*():^-'})
 
 
+#: Terms shorter than this are matched exactly. Prefix-matching two-letter tokens
+#: matches nearly everything and destroys precision, which §9.4 says is the objective.
+_MIN_PREFIX_LEN = 4
+
+
 def _sanitize(query: str) -> str:
     """Make a user query safe for the FTS5 grammar without silently changing intent.
 
     FTS5 raises on unbalanced quotes and stray operators. Quoting each term keeps a
     plain-language query working without the user needing to know the syntax.
+
+    **Prefix matching on terms of four characters or more.** FTS5's tokenizer does not
+    stem, so ``service`` does not match ``services`` and ``deploy`` does not match
+    ``deployment`` — and morphological variation is by far the most common lexical
+    miss on a personal corpus, where you rarely phrase a question with the exact word
+    you used months ago.
+
+    This is still rung 1: BM25 over a lexical index, no embeddings, no model. It does
+    not bypass the rung-2 trigger in ADR 0002 — it is what rung 1 should have been
+    doing all along. Genuine paraphrase (``database`` for ``Postgres``) still misses,
+    and that miss is the signal the trigger watches for.
     """
     terms = [t for t in query.translate(_FTS_SPECIAL).split() if t]
     if not terms:
         return ""
-    return " OR ".join(f'"{t}"' for t in terms)
+    return " OR ".join(f'"{t}"*' if len(t) >= _MIN_PREFIX_LEN else f'"{t}"' for t in terms)
 
 
 class Fts5Backend(SearchBackend):
