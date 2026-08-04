@@ -39,6 +39,9 @@ class Hit:
     path: str
     evidence: list[str] = field(default_factory=list)
     unresolved_conflict: str | None = None
+    #: Credential classes masked on the way out (§11.4). Non-empty means the stored
+    #: bytes still contain them — redaction protects the model, not the disk.
+    redacted: list[str] = field(default_factory=list)
 
 
 class SearchBackend(ABC):

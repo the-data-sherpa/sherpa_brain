@@ -39,29 +39,39 @@ reader than a clean surface.
 
 ## Status
 
-**Phase 0.5 and Phase 1 are complete.** All fourteen steps built, all nineteen acceptance
-criteria passing, **133 tests**, four runtime dependencies.
+**Phase 0.5 and Phase 1 complete, plus production hardening.** All fourteen build
+steps, all nineteen acceptance criteria, **182 tests**, mypy strict clean, four runtime
+dependencies.
 
 ```
-brain init                          brain forget <id>        # exits 3 if unreplicated
-brain remember "..."                brain sync
-brain search <query>                brain backup create|verify|restore
-brain get <id> --history            brain export <dir>
-brain ingest <file>                 brain reconcile
-brain record "..."                  brain conflicts list|show|resolve
-brain evidence <ref> --lines 4-8    brain eval bootstrap|run|probe|slope
+brain init / doctor / install-timers      brain forget <id> [--kind artifact|event]
+brain remember "..."                      brain sync
+brain search <query>                      brain backup create|verify|restore
+brain get <id> --history                  brain export <dir>
+brain ingest <file>                       brain expire / unexpire
+brain record "..."                        brain reconcile
+brain evidence <ref> --lines 4-8          brain conflicts list|show|resolve
+brain ledger init|status                  brain eval bootstrap|run|probe|slope
 ```
 
-Plus an MCP server exposing four tools.
+Plus an MCP server exposing four tools. See [`docs/RUNBOOK.md`](docs/RUNBOOK.md) to
+operate it.
+
+**Start here:** `brain doctor` reports every quiet failure mode in one place and exits
+`4` when a safety property is not holding.
+
+**Before deleting anything**, configure the off-device replica — until then quorum is
+unreachable and every deletion reports `pending` forever (RUNBOOK §1.1).
 
 **What is deliberately absent:** background extraction, consolidation, dense retrieval,
-a graph store, and PostgreSQL. Each is gated on a written trigger in
-[`docs/decisions/0002-migration-triggers.md`](docs/decisions/0002-migration-triggers.md)
-rather than on enthusiasm. None of those triggers is met on day one, by construction.
+a graph store, and PostgreSQL. Each is gated on a measured trigger in
+[`docs/decisions/0002-migration-triggers.md`](docs/decisions/0002-migration-triggers.md),
+and none of those triggers is met on day one, by construction.
 
-**The one real gap:** the golden set is a template plus drafted candidates, not 150 real
-questions — it needs a corpus that only use produces. `brain eval slope` refuses to
-compute below the item floor rather than emitting a precise-looking number from noise.
+**The honest risk:** capture is explicit-only. Nothing is written unless you write it.
+Every personal knowledge system that failed, failed of disuse rather than corruption —
+`brain doctor` warns on an empty store for that reason. Closing it properly means
+Phase 2 background extraction, which needs model calls you deferred.
 
 ## Requirements
 

@@ -599,6 +599,33 @@ Eleven rounds of adversarial review against an independent reviewer (Codex/GPT-5
 
 ---
 
+## 5.7 Post-build hardening
+
+A production-readiness audit after the plan completed found nine further gaps, four
+blocking. They are recorded here because several were invisible to the test suite and
+one broke the guarantee the entire design review was about.
+
+| Gap | Severity | Resolution |
+|---|---|---|
+| **Unwitnessed edits destroyed by any mediated write** | blocking | A caller reading present immediately before writing always satisfied CAS, so a hand edit sitting in present was silently discarded — the MCP server did exactly this. Capture is now **unconditional**: displaced bytes not already in the log are published regardless of what the caller claimed. `brain.get` returns a revision token; `brain.write` accepts `expected_revision` so a stale caller diverges |
+| Deletion quorum unreachable | blocking | `GitLedgerReplicator` existed with no CLI path, so every `forget` pended forever with no explanation. `brain ledger init|status`; status exits 3 when protection cannot be verified |
+| Only memories could be forgotten | blocking | An ingested secret was unerasable — "forgetting" was true of conclusions and false of sources. `--kind memory\|artifact\|event` |
+| Decay and expiry never implemented | blocking | Invariant §5.7 did not exist in code. `store/lifecycle.py`: volatility expiry, 30-day proposal decay, 90-day recoverable grace, then a real tombstone |
+| Secrets scanned on write but not on output | major | §11.4 requires both. Reads now redact — **reject on write, redact on read**, because at write nothing is on disk yet and at read refusing would hide the problem while the secret sits there |
+| `idempotency_key` accepted and ignored | major | A retried call now returns the *original* result, not merely avoiding a duplicate |
+| No resource budgets | major | Query log trimmed by age then count, purge ledger compacted. Tombstones are never compacted — that would mean forgetting what was forgotten |
+| No CI | major | The adapter purity check was documented as "CI-enforced" and was not |
+| mypy never run | minor | 17 errors; strict now passes |
+
+**Five of the nine were found by running the system, not by testing it.** Unit tests
+confirm the code does what you wrote; smoke tests reveal what you forgot to write.
+
+Also added for operation: `brain doctor` (one command for every quiet failure mode),
+`brain install-timers` (systemd user units — the sweeps are correct and useless
+unscheduled), and `docs/RUNBOOK.md`.
+
+---
+
 ## 5.6 Build status — COMPLETE
 
 All fourteen steps are built and all nineteen acceptance criteria in §1 pass. **133 tests**, four runtime dependencies, ~7,600 lines including tests.

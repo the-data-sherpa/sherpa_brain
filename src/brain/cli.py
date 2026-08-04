@@ -31,7 +31,7 @@ from .index import build
 from .model import Evidence, Memory, MemoryType, ProvenanceClass, Volatility
 from .search.fts5 import Fts5Backend
 from .search.ripgrep import RipgrepBackend
-from .store import artifacts, deletion, events, ledger, reconcile, revisions
+from .store import artifacts, budgets, deletion, events, ledger, reconcile, revisions
 from .store import memory as mem
 from .store import resolve as resolve_mod
 
@@ -232,11 +232,13 @@ def get(
         raise typer.Exit(EXIT_FAIL_CLOSED)
 
     path = Path(row["file_path"])
+    content, redacted = scan.redact(path.read_text() if path.exists() else "")
     payload: dict[str, object] = {
         "id": memory_id,
         "workspace": row["workspace"],
         "disposition": row["disposition"],
-        "content": path.read_text() if path.exists() else None,
+        "content": content or None,
+        **({"redacted": sorted({f.kind for f in redacted})} if redacted else {}),
         "evidence": [
             dict(r)
             for r in conn.execute(
@@ -445,7 +447,11 @@ def sync(state: StateOpt = None) -> None:
     _require_intact_ledgers(p)
     report = deletion.resume(p, replicate=_replicator(p))
     pending = deletion.pending_deletions(p)
-    emit({**report, "still_pending": pending})
+    # Budgets ride along with sync rather than needing their own timer: an
+    # append-only store that runs unattended for months fills a disk with its own
+    # telemetry otherwise.
+    trimmed = budgets.sweep(p)
+    emit({**report, "still_pending": pending, "budgets": trimmed})
     if report["residue"]:
         raise typer.Exit(EXIT_FAIL_CLOSED)
     if pending:
@@ -899,6 +905,51 @@ def unexpire(
     build.rebuild(p, conn)
     conn.close()
     emit({"id": memory_id, "status": "confirmed"})
+
+
+@app.command()
+def doctor(state: StateOpt = None) -> None:
+    """One command that answers: is this store healthy?
+
+    The failure modes this design worries about are quiet ones — a broken ledger, an
+    unreachable replica, unpurged residue. Several mean a safety property has stopped
+    holding while every ordinary command still works.
+
+    Exits 4 on any FAIL, 3 on any WARN, 0 when clean.
+    """
+    from . import doctor as doctor_mod
+
+    p = _paths(state)
+    result = doctor_mod.report(p)
+    emit(result)
+    if result["status"] == "fail":
+        raise typer.Exit(EXIT_FAIL_CLOSED)
+    if result["status"] == "warn":
+        raise typer.Exit(EXIT_PENDING)
+
+
+@app.command()
+def install_timers(
+    dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
+    state: StateOpt = None,
+) -> None:
+    """Write systemd --user units so the sweeps actually run.
+
+    `expire`, `sync`, and `backup` are correct and useless unscheduled. Nothing here
+    touches the system: user units, no root, and `--dry-run` prints instead of writing.
+    """
+    from .ops import install_user_timers
+
+    p = _paths(state)
+    written = install_user_timers(p, dry_run=dry_run)
+    emit({"units": written, "dry_run": dry_run})
+    if not dry_run:
+        err(
+            "Now run:\n"
+            "  systemctl --user daemon-reload\n"
+            "  systemctl --user enable --now brain-sync.timer brain-backup.timer\n"
+            "Check with: systemctl --user list-timers 'brain-*'"
+        )
 
 
 @app.command()

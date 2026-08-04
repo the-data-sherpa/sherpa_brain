@@ -172,6 +172,20 @@ def all_digests(paths: Paths) -> list[str]:
     return sorted(p.parent.name for p in root.rglob(META))
 
 
+def _redacted_span(text: str, start: int | None, end: int | None) -> tuple[str, list[str]]:
+    """Resolve a span and mask any credentials in it.
+
+    Artifacts are stored verbatim — an imported document is evidence and is never
+    rewritten on the way in. That makes this the read path most likely to surface a
+    secret, so masking here is not belt-and-braces.
+    """
+    from .. import scan
+
+    excerpt = resolve_span(text, start, end)
+    masked, findings = scan.redact(excerpt)
+    return masked, sorted({f.kind for f in findings})
+
+
 def resolve_span(text: str, start: int | None, end: int | None) -> str:
     """Return the lines a span points at.
 
@@ -200,13 +214,15 @@ def resolve_evidence(paths: Paths, ref: str, start: int | None, end: int | None)
         if found is None:
             return {"ref": ref, "resolved": False, "reason": "event not found"}
         event, segment = found
+        excerpt, redacted = _redacted_span(event.text, start, end)
         return {
             "ref": ref,
             "resolved": True,
             "kind": "event",
             "occurred_at": event.occurred_at,
             "segment": str(segment),
-            "excerpt": resolve_span(event.text, start, end),
+            "excerpt": excerpt,
+            **({"redacted": redacted} if redacted else {}),
         }
     if kind == "artifact":
         a = read(paths, ident)
@@ -224,6 +240,7 @@ def resolve_evidence(paths: Paths, ref: str, start: int | None, end: int | None)
                 "media_type": a.media_type,
                 "excerpt": f"<{a.size} bytes of {a.media_type}>",
             }
+        excerpt, redacted = _redacted_span(text, start, end)
         return {
             "ref": ref,
             "resolved": True,
@@ -231,7 +248,8 @@ def resolve_evidence(paths: Paths, ref: str, start: int | None, end: int | None)
             "source_uri": a.source_uri,
             "media_type": a.media_type,
             "captured_at": a.captured_at,
-            "excerpt": resolve_span(text, start, end),
+            "excerpt": excerpt,
+            **({"redacted": redacted} if redacted else {}),
         }
     return {"ref": ref, "resolved": False, "reason": f"unknown pointer kind {kind!r}"}
 

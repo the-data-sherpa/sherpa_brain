@@ -31,7 +31,7 @@ from .ids import new_ulid
 from .index import build
 from .model import Evidence, Memory, MemoryType, ProvenanceClass, Volatility, utcnow
 from .search.fts5 import Fts5Backend
-from .store import deletion, ledger, revisions
+from .store import budgets, deletion, ledger, revisions
 from .store import memory as mem
 
 mcp = MCPServer(
@@ -124,6 +124,8 @@ async def brain_get(
                     "closed until a human resolves it. Do not guess which is right."
                 )
             }
+        raw = Path(row["file_path"]).read_text() if Path(row["file_path"]).exists() else ""
+        content, redacted = scan.redact(raw)
         payload: dict[str, Any] = {
             "id": id,
             "workspace": row["workspace"],
@@ -131,10 +133,14 @@ async def brain_get(
             # so a correction written against stale content diverges rather than
             # silently overwriting.
             "revision": row["newest_rev"],
-            "content": Path(row["file_path"]).read_text()
-            if Path(row["file_path"]).exists()
-            else None,
+            "content": content or None,
         }
+        if redacted:
+            payload["redacted"] = sorted({f.kind for f in redacted})
+            payload["redaction_note"] = (
+                "Credentials were masked on the way out. The stored bytes still "
+                "contain them — run `brain validate` and purge the source."
+            )
         if include_provenance:
             payload["evidence"] = [
                 dict(r)
@@ -192,6 +198,11 @@ async def brain_write(
     p, refusal = _paths_guarded()
     if refusal:
         return {"error": refusal}
+    # A retried call must return what the FIRST one returned — not merely avoid a
+    # duplicate. A client that retries after a timeout needs the original id back,
+    # or it will conclude the write failed and try again with a fresh key.
+    if prior := budgets.replay(p, idempotency_key):
+        return prior
     if op not in ("propose", "correct"):
         return {"error": f"op must be 'propose' or 'correct', not {op!r}"}
     try:
@@ -248,7 +259,10 @@ async def brain_write(
     conn = build.connect(p)
     build.rebuild(p, conn)
     conn.close()
-    return {"id": result.memory_id, "revision": result.revision_no, "op": op}
+    payload = {"id": result.memory_id, "revision": result.revision_no, "op": op}
+    if idempotency_key:
+        budgets.remember_key(p, idempotency_key, payload)
+    return payload
 
 
 @mcp.tool(name="brain.forget")

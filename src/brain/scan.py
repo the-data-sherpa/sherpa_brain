@@ -128,3 +128,39 @@ def assert_clean(text: str) -> None:
     """Raise ``SecretFound`` if ``text`` contains anything credential-shaped."""
     if findings := scan(text):
         raise SecretFound(findings)
+
+
+REDACTION = "[REDACTED: {kind}]"
+
+
+def redact(text: str) -> tuple[str, list[Finding]]:
+    """Mask credentials on the way OUT. Returns the masked text and what was found.
+
+    §11.4 requires scanning before persistence **and before model output**, and the
+    right response differs at each end:
+
+    - **On write, reject.** Nothing is on disk yet, so refusing keeps it that way. A
+      redacted secret has already been written.
+    - **On read, redact.** The bytes are already stored — refusing to serve would
+      hide the problem while the secret sits on disk. Masking stops it reaching the
+      model *and* leaves the finding visible so it can be purged for real.
+
+    This matters for anything that entered before the scanner existed, and for
+    ingested artifacts, which are stored verbatim by design: an imported document is
+    evidence, so it is never rewritten on the way in.
+    """
+    findings = scan(text)
+    if not findings:
+        return text, []
+
+    out = text
+    for _, pattern in _PATTERNS:
+        out = pattern.sub(lambda m: REDACTION.format(kind="credential"), out)
+    masked_lines = []
+    for line in out.splitlines():
+        rebuilt = line
+        for token in _TOKEN.findall(line):
+            if not _is_benign(token) and shannon_entropy(token) >= _ENTROPY_THRESHOLD:
+                rebuilt = rebuilt.replace(token, REDACTION.format(kind="high-entropy"))
+        masked_lines.append(rebuilt)
+    return "\n".join(masked_lines), findings

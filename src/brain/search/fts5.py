@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import sqlite3
 
+from .. import scan
 from ..config import Paths
 from ..index import build
 from .base import Hit, SearchBackend
@@ -90,12 +91,17 @@ class Fts5Backend(SearchBackend):
                     (r["memory_id"],),
                 )
             ]
+            # Redact on the way out. Anything that entered before the scanner
+            # existed, or arrived inside an ingested artifact, must not reach a model.
+            title, _ = scan.redact(r["title"] or "")
+            excerpt, redacted = scan.redact((r["excerpt"] or "").strip())
             hits.append(
                 Hit(
                     memory_id=r["memory_id"],
                     workspace=r["workspace"],
-                    title=r["title"] or "",
-                    excerpt=(r["excerpt"] or "").strip(),
+                    title=title,
+                    excerpt=excerpt,
+                    redacted=[f.kind for f in redacted],
                     score=-float(r["score"]),  # bm25() is negative; lower is better
                     path=r["file_path"],
                     evidence=evidence,
