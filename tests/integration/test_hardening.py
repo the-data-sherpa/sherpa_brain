@@ -15,7 +15,7 @@ from brain.frontmatter import serialize
 from brain.index import build
 from brain.model import Evidence, Memory, MemoryType, ProvenanceClass, Volatility, iso, utcnow
 from brain.search.fts5 import Fts5Backend
-from brain.store import artifacts, budgets
+from brain.store import artifacts, budgets, deletion
 from brain.store import memory as mem
 
 LEAKED = "ghp_abcdefghijklmnopqrstuvwxyz0123456789"
@@ -236,7 +236,7 @@ def test_tombstones_are_never_compacted(paths: Paths) -> None:
 
 def test_doctor_flags_an_empty_store(paths: Paths) -> None:
     """Emptiness is the failure mode that actually kills these systems."""
-    checks, worst = doctor.run(paths)
+    checks, _ = doctor.run(paths)
     capture = next(c for c in checks if c.name == "capture")
     assert capture.level is doctor.Level.WARN
     assert "disuse" in capture.detail
@@ -332,3 +332,76 @@ def test_timer_units_are_user_scoped_and_reference_this_store(
     assert "SuccessExitStatus=0 1 3" in service, "pending is a normal state, not a failure"
     timer = (tmp_path / "systemd" / "user" / "brain-backup.timer").read_text()
     assert "Persistent=true" in timer, "a missed backup must run on next boot"
+
+
+# ── replication, end to end ──────────────────────────────────────────────────────
+
+
+@pytest.fixture
+def replicated(paths: Paths, tmp_path: Path):  # type: ignore[no-untyped-def]
+    import subprocess
+
+    from brain.store.replicate import GitLedgerReplicator
+
+    remote = tmp_path / "remote.git"
+    subprocess.run(["git", "init", "--bare", "-q", str(remote)], check=True)
+    r = GitLedgerReplicator(paths)
+    r.init_repo(str(remote))
+    return r, remote
+
+
+def test_replication_pushes_the_ledger_and_acks(paths: Paths, replicated) -> None:  # type: ignore[no-untyped-def]
+    """Every earlier test used NullReplicator, so the real git path never ran once —
+    and it crashed on the first push, for everyone who followed the runbook.
+
+    `git rev-parse <ref>` prints the REF NAME when the ref does not exist, so the
+    truthiness check passed and `-p refs/heads/ledger` was handed to commit-tree.
+    """
+    import subprocess
+
+    from brain.store import ledger
+
+    r, remote = replicated
+    m = seed_with_secret(paths, 0)
+    result = deletion.forget(paths, m.id, replicate=r)
+
+    assert result.suppressed
+    acks = ledger.read_chain(paths.acks)
+    assert acks, "a successful push must be acknowledged"
+    assert acks[-1].payload["replica_identity"] == r.identity
+
+    # ...and the bytes are genuinely on the remote, not merely claimed.
+    shown = subprocess.run(
+        ["git", "--git-dir", str(remote), "show", "refs/heads/ledger:tombstones.jsonl"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    assert m.id in shown
+
+
+def test_replication_failure_never_crashes_the_caller(paths: Paths, replicated) -> None:  # type: ignore[no-untyped-def]
+    """The deletion is already durable and already suppressed; only the receipt is
+    at stake, so a broken remote must degrade to `pending`, not raise."""
+    import shutil
+
+    r, remote = replicated
+    shutil.rmtree(remote)
+
+    m = seed_with_secret(paths, 1)
+    result = deletion.forget(paths, m.id, replicate=r)
+    assert result.suppressed
+    assert result.delivery is deletion.DeliveryState.PENDING
+
+
+def test_sync_exits_pending_not_error_when_a_replica_is_configured(  # type: ignore[no-untyped-def]
+    paths: Paths, replicated
+) -> None:
+    from typer.testing import CliRunner
+
+    from brain.cli import EXIT_OK, app
+
+    m = seed_with_secret(paths, 2)
+    deletion.forget(paths, m.id, replicate=deletion.NullReplicator())
+    r = CliRunner().invoke(app, ["sync", "--state", str(paths.root)])
+    assert r.exit_code in (EXIT_OK, 3), f"sync crashed: {r.exit_code}"

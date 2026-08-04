@@ -137,14 +137,16 @@ class GitLedgerReplicator(Replicator):
             return False
 
         try:
-            blob = _git(self.repo, "hash-object", "-w", "--stdin-paths", check=False)
             blob = self._write_blob(paths.tombstones)
             tree = self._write_tree(blob)
             commit = self._commit(tree, f"ledger seq {seq}")
             _git(self.repo, "update-ref", REF, commit)
             _git(self.repo, "push", "origin", f"{REF}:{REF}", timeout=120)
-        except (GitError, OSError, subprocess.TimeoutExpired):
-            # An uncertain outcome is resolved by reading the remote, not by assuming.
+        except (GitError, OSError, subprocess.SubprocessError):
+            # An uncertain outcome is resolved by reading the remote below, never by
+            # assuming either way. Replication failing must never crash the caller:
+            # the deletion is already durable and already suppressed, and only the
+            # receipt is at stake.
             pass
 
         remote_sha = self._read_remote_ref()
@@ -189,9 +191,15 @@ class GitLedgerReplicator(Replicator):
         return proc.stdout.strip()
 
     def _commit(self, tree: str, message: str) -> str:
-        parent = _git(self.repo, "rev-parse", REF, check=False)
+        # `rev-parse <ref>` prints the REF NAME when the ref does not exist, so a
+        # truthiness check passes and `-p refs/heads/ledger` is then handed to
+        # commit-tree, which fails. `--verify <ref>^{commit}` returns nothing and a
+        # non-zero status instead, which is what "no parent yet" should look like.
+        parent = _git(
+            self.repo, "rev-parse", "--verify", "--quiet", f"{REF}^{{commit}}", check=False
+        )
         args = ["commit-tree", tree, "-m", message]
-        if parent and not parent.startswith("fatal"):
+        if _is_sha(parent):
             args += ["-p", parent]
         env_repo = self.repo
         proc = subprocess.run(
@@ -216,6 +224,10 @@ class GitLedgerReplicator(Replicator):
         except (GitError, OSError, subprocess.TimeoutExpired):
             return False
         return content.strip() == local.read_text().strip()
+
+
+def _is_sha(value: str) -> bool:
+    return len(value) == 40 and all(c in "0123456789abcdef" for c in value)
 
 
 def _slug(remote: str) -> str:
