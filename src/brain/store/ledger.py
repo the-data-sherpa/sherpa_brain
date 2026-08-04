@@ -146,7 +146,9 @@ def append(path: Path, payload: dict[str, Any]) -> Entry:
     return e
 
 
-def tombstone_payload(subject_id: str, kind: str = "memory", reason: str | None = None) -> dict:
+def tombstone_payload(
+    subject_id: str, kind: str = "memory", reason: str | None = None
+) -> dict[str, Any]:
     """A content-free tombstone.
 
     No title, no body, no excerpt. ``reason`` is omitted by default rather than
@@ -172,7 +174,7 @@ def ack_payload(
     remote_sha: str,
     ref: str,
     protection_verified: bool,
-) -> dict:
+) -> dict[str, Any]:
     """Record exactly what was *verified*, not that a command exited zero.
 
     ``replica_identity`` is derived by the caller from the configured authenticated
@@ -191,7 +193,7 @@ def ack_payload(
     }
 
 
-def purge_payload(subject_id: str, removed: list[str]) -> dict:
+def purge_payload(subject_id: str, removed: list[str]) -> dict[str, Any]:
     """A point-in-time observation that bytes were absent — never an enduring fact.
 
     A file can be recreated after this is written, by a restore or an editor the

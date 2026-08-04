@@ -68,7 +68,7 @@ def append(
     when: date | None = None,
 ) -> Event:
     """Append an event and return it. The id is what evidence pointers reference."""
-    record = {
+    record: dict[str, Any] = {
         "id": new_ulid(),
         "kind": kind,
         "occurred_at": iso(utcnow()),
@@ -87,11 +87,11 @@ def append(
         os.close(fd)
     fsync_dir(path.parent)
     return Event(
-        record["id"],  # type: ignore[arg-type]
+        str(record["id"]),
         kind,
-        record["occurred_at"],  # type: ignore[arg-type]
+        str(record["occurred_at"]),
         payload,
-        line["checksum"],
+        str(line["checksum"]),
         session,
         actor,
     )

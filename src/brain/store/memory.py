@@ -169,10 +169,26 @@ def write(
 
             advance_op(paths, op, OpPhase.EXCHANGED)
 
+            # UNCONDITIONAL: if the bytes we just displaced are not already in the
+            # revision log, publish them. This holds "no committed state is ever
+            # lost" *structurally*, rather than relying on the caller to supply an
+            # honest predecessor.
+            #
+            # An earlier version only captured on mismatch, which meant a caller who
+            # read present immediately before writing — exactly what the MCP server
+            # did — always matched, and any unwitnessed edit sitting in present was
+            # silently destroyed. The guarantee cannot depend on caller discipline.
+            displaced_unrecorded = (
+                displaced_hash is not None
+                and revisions.find_by_hash(paths, memory_id, displaced_hash) is None
+            )
+            if displaced_unrecorded:
+                _publish_displaced(paths, memory_id, present_tmp)
+
+            # Contested is a *separate* question: did the caller write from a state
+            # other than the one it displaced?
             contested = displaced_hash != expected_predecessor
             if contested:
-                # We are holding an unwitnessed edit. It is NOT lost: publish it as
-                # its own revision, mark the memory contested, and let a human choose.
                 theirs = _publish_displaced(paths, memory_id, present_tmp)
                 write_conflict(paths, memory_id, ours=n, theirs=theirs, opid=opid)
 

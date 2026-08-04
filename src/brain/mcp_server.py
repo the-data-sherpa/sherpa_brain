@@ -26,12 +26,12 @@ from typing import Any, Literal
 from mcp.server import MCPServer
 
 from . import config, scan
-from .frontmatter import serialize
+from .frontmatter import content_hash, serialize
 from .ids import new_ulid
 from .index import build
 from .model import Evidence, Memory, MemoryType, ProvenanceClass, Volatility, utcnow
 from .search.fts5 import Fts5Backend
-from .store import deletion, ledger
+from .store import deletion, ledger, revisions
 from .store import memory as mem
 
 mcp = MCPServer(
@@ -127,6 +127,10 @@ async def brain_get(
         payload: dict[str, Any] = {
             "id": id,
             "workspace": row["workspace"],
+            # Round-trip this into brain.write(op="correct", expected_revision=…)
+            # so a correction written against stale content diverges rather than
+            # silently overwriting.
+            "revision": row["newest_rev"],
             "content": Path(row["file_path"]).read_text()
             if Path(row["file_path"]).exists()
             else None,
@@ -171,6 +175,7 @@ async def brain_write(
     evidence: list[str] | None = None,
     workspace: str = "default",
     id: str | None = None,
+    expected_revision: int | None = None,
     idempotency_key: str | None = None,
 ) -> dict[str, Any]:
     """Propose or correct a memory.
@@ -178,6 +183,11 @@ async def brain_write(
     ``op`` is 'propose' or 'correct'. Credentials are REJECTED, never stored
     redacted. ``volatility`` is required: immutable (never decays), slow (revisit
     on contradiction), volatile (re-confirm aggressively), or ephemeral (expires).
+
+    For ``correct``, pass ``expected_revision`` — the ``revision`` field returned by
+    ``brain.get``. If the memory has moved on since you read it, the write DIVERGES
+    instead of overwriting, and a human resolves it. Omitting it means the server
+    cannot tell a considered correction from a stale one.
     """
     p, refusal = _paths_guarded()
     if refusal:
@@ -207,7 +217,23 @@ async def brain_write(
         return {"error": f"invalid field: {exc}"}
 
     dest = mem.present_path(p, workspace, mtype.value, m.id)
-    predecessor = mem.present_hash(dest) if op == "correct" else None
+    predecessor = None
+    if op == "correct":
+        if expected_revision is not None:
+            data = revisions.read_revision(p, m.id, expected_revision)
+            if data is None:
+                return {
+                    "error": (
+                        f"expected_revision {expected_revision} does not exist for {m.id}. "
+                        "Re-read with brain.get and retry."
+                    )
+                }
+            predecessor = content_hash(data)
+        else:
+            # No token supplied. Use present, which is honest about what we are
+            # displacing — and the write protocol captures it as a revision either
+            # way, so nothing is lost. It just cannot detect a stale caller.
+            predecessor = mem.present_hash(dest)
     try:
         result = mem.write(
             p,

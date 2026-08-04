@@ -24,6 +24,7 @@ import json
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
+from typing import Any
 
 from ..atomic import fsync_dir, write_atomic
 from ..config import Paths
@@ -189,24 +190,109 @@ def purge(
     return removed, residue
 
 
+def purge_artifact(paths: Paths, digest: str) -> tuple[list[str], list[str]]:
+    """Erase an ingested artifact.
+
+    Without this, a secret arriving inside an ingested document cannot be removed —
+    which would make "forgetting" true of memories and false of evidence, and
+    evidence is where the sensitive material usually is.
+    """
+    from . import artifacts
+
+    d = artifacts.blob_dir(paths, digest)
+    if not d.exists():
+        return [], []
+    removed = [str(p) for p in d.rglob("*") if p.is_file()]
+    artifacts.purge(paths, digest)
+    residue = [str(p) for p in d.rglob("*")] if d.exists() else []
+    if not residue:
+        ledger.append(paths.purges, ledger.purge_payload(digest, removed))
+    return removed, residue
+
+
+def purge_event(paths: Paths, event_id: str) -> tuple[list[str], list[str]]:
+    """Erase one event by redaction fork — never by editing a segment in place."""
+    from . import events
+
+    found = events.find(paths, event_id)
+    if found is None:
+        return [], []
+    _, segment = found
+    forked, dropped = events.redaction_fork(paths, segment, {event_id})
+    if dropped == 0:
+        return [], [str(segment)]
+    ledger.append(paths.purges, ledger.purge_payload(event_id, [str(segment)]))
+    return [f"{segment} -> {forked}"], []
+
+
+def dangling_evidence(paths: Paths) -> list[dict[str, Any]]:
+    """Memories whose evidence no longer resolves.
+
+    Deleting evidence is legitimate, but it silently weakens every claim that cited
+    it. A pointer that has stopped resolving should be visible, not merely fail-safe.
+    """
+    from ..frontmatter import InvalidFrontmatter, parse
+    from . import artifacts
+
+    out: list[dict[str, Any]] = []
+    if not paths.memories.is_dir():
+        return out
+    tombstoned = tombstoned_ids(paths)
+    for path in sorted(paths.memories.rglob("*.md")):
+        if ".revisions" in path.parts or ".staging" in path.parts:
+            continue
+        try:
+            m = parse(path.read_text(), path)
+        except (InvalidFrontmatter, OSError, UnicodeDecodeError):
+            continue
+        if m.id in tombstoned:
+            continue
+        for e in m.evidence:
+            if not e.ref.startswith(("event:", "artifact:")):
+                continue
+            resolved = artifacts.resolve_evidence(paths, e.ref, e.span_start, e.span_end)
+            if not resolved.get("resolved"):
+                out.append(
+                    {
+                        "memory_id": m.id,
+                        "ref": e.ref,
+                        "reason": resolved.get("reason", "unresolved"),
+                    }
+                )
+    return out
+
+
 def forget(
     paths: Paths,
     subject_id: str,
     *,
+    kind: str = "memory",
     workspace: str = "default",
     mtype: str = "semantic",
     replicate: Replicator | None = None,
     required_replicas: int = 2,
     reason: str | None = None,
 ) -> ForgetResult:
-    """Delete a subject. Suppression is immediate; the receipt waits on quorum."""
+    """Delete a subject. Suppression is immediate; the receipt waits on quorum.
+
+    ``kind`` is ``memory``, ``artifact``, or ``event``. All three are erasable — a
+    store that can forget what it concluded but not what it read has not really
+    forgotten anything.
+    """
     # 1. Durable local tombstone. From this instant the subject is unreachable,
     #    regardless of network state, purge progress, or anything else.
     if not is_tombstoned(paths, subject_id):
-        ledger.append(paths.tombstones, ledger.tombstone_payload(subject_id, reason=reason))
+        ledger.append(
+            paths.tombstones, ledger.tombstone_payload(subject_id, kind=kind, reason=reason)
+        )
 
     # 2. Physical purge. Independent of replication.
-    removed, residue = purge(paths, subject_id, workspace, mtype)
+    if kind == "artifact":
+        removed, residue = purge_artifact(paths, subject_id)
+    elif kind == "event":
+        removed, residue = purge_event(paths, subject_id)
+    else:
+        removed, residue = purge(paths, subject_id, workspace, mtype)
 
     # 3. Replication. Gates only the receipt.
     if replicate is not None:
@@ -224,7 +310,9 @@ def forget(
     )
 
 
-def resume(paths: Paths, replicate: Replicator | None = None, required: int = 2) -> dict:
+def resume(
+    paths: Paths, replicate: Replicator | None = None, required: int = 2
+) -> dict[str, list[Any]]:
     """Idempotently finish every incomplete deletion. Run at startup and on `sync`.
 
     **Every tombstoned subject is re-scanned for physical residue, regardless of
@@ -233,7 +321,7 @@ def resume(paths: Paths, replicate: Replicator | None = None, required: int = 2)
     receipt was written — silently reintroducing the residue the receipt claims is
     gone. A receipt informs history; it never shortens a scan.
     """
-    report: dict[str, list] = {"repurged": [], "replicated": [], "residue": []}
+    report: dict[str, list[Any]] = {"repurged": [], "replicated": [], "residue": []}
     for sid in sorted(tombstoned_ids(paths)):
         found = [
             str(p)
@@ -255,8 +343,8 @@ def resume(paths: Paths, replicate: Replicator | None = None, required: int = 2)
     return report
 
 
-def pending_deletions(paths: Paths, required: int = 2) -> list[dict]:
-    out = []
+def pending_deletions(paths: Paths, required: int = 2) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
     for sid in sorted(tombstoned_ids(paths)):
         state, n = delivery_state(paths, sid, required)
         if state is DeliveryState.PENDING:

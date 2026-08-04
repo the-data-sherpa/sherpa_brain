@@ -239,4 +239,4 @@ def probe_capabilities(directory: Path) -> Capabilities:
         for p in (a, b, c):
             p.unlink(missing_ok=True)
         probe.rmdir()
-    return Capabilities(**results)  # type: ignore[arg-type]
+    return Capabilities(**results)

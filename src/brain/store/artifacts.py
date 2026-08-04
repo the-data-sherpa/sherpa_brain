@@ -21,6 +21,7 @@ import json
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from ..atomic import fsync_dir, write_atomic
 from ..config import Paths
@@ -72,7 +73,7 @@ def store(
 
     d.mkdir(parents=True, exist_ok=True)
     write_atomic(blob, data)
-    meta = {
+    meta: dict[str, Any] = {
         "digest": digest,
         "filename": filename,
         "media_type": media_type,
@@ -89,7 +90,7 @@ def store(
         blob,
         media_type,
         source_uri,
-        meta["captured_at"],
+        str(meta["captured_at"]),
         parser_version,
         len(data),
         tags or [],
@@ -185,7 +186,7 @@ def resolve_span(text: str, start: int | None, end: int | None) -> str:
     return "\n".join(lines[lo:hi])
 
 
-def resolve_evidence(paths: Paths, ref: str, start: int | None, end: int | None) -> dict:
+def resolve_evidence(paths: Paths, ref: str, start: int | None, end: int | None) -> dict[str, Any]:
     """Resolve an evidence pointer to the actual source text it names.
 
     This is the operation that makes evidence real rather than decorative: without

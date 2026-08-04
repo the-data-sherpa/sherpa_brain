@@ -1,0 +1,93 @@
+name: ci
+
+# §11.3 and acceptance criterion 16 describe the adapter purity check as
+# "CI-enforced". Until this file existed, that claim was false — the check ran in
+# code and in tests, but nothing gated a merge on it.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv sync --all-extras --dev
+
+      - name: lint
+        run: uv run ruff check src tests
+
+      - name: format
+        run: uv run ruff format --check src tests
+
+      - name: types
+        run: uv run mypy
+
+      - name: tests
+        run: uv run pytest -q
+
+      # The crash suite forks and calls os._exit mid-protocol. It is separated so a
+      # failure here is unmistakable: it means a real durability boundary moved.
+      - name: crash safety
+        run: uv run pytest tests/crash -q -m crash
+
+      - name: generic MCP conformance
+        run: uv run pytest tests/conformance -q
+
+  adapter-purity:
+    # The security control from §11.3, as its own job so it cannot be lost in a
+    # wall of test output. Generated instruction files are loaded as high-trust
+    # context; if one can carry memory content, we have rebuilt the exact path
+    # Claude Code v2.1.50 removed.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync --all-extras --dev
+
+      - name: generated adapters must contain pointers only
+        run: |
+          uv run python - <<'PY'
+          import sys, tempfile
+          from pathlib import Path
+          sys.path.insert(0, "src")
+          from brain import adapters
+          from brain.config import Paths
+
+          root = Path(tempfile.mkdtemp())
+          failures = []
+          for target in ("claude", "codex"):
+              for a in adapters.generate(Paths(root), target, root):
+                  try:
+                      adapters.assert_pointers_only(a.content, target)
+                  except adapters.AdapterPurityError as exc:
+                      failures.append(str(exc))
+          if failures:
+              print("\n".join(failures))
+              sys.exit(1)
+          print("adapter output is pointers-only")
+          PY
+
+      - name: the purity check must actually reject content
+        run: |
+          uv run python - <<'PY'
+          import sys
+          sys.path.insert(0, "src")
+          from brain import adapters
+
+          # A check that never fails is not a check. Prove it rejects the exact
+          # shape it exists to catch.
+          poisoned = "---\nid: 01K1Z8V4Q0000000000000000\nprovenance_class: x\n---\n"
+          try:
+              adapters.assert_pointers_only(poisoned, "claude")
+          except adapters.AdapterPurityError:
+              print("purity check rejects inlined memory content")
+              sys.exit(0)
+          print("FAIL: purity check accepted memory content")
+          sys.exit(1)
+          PY

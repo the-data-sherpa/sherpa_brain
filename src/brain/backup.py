@@ -28,6 +28,7 @@ import shutil
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from .atomic import fsync_dir, write_atomic
 from .config import Paths
@@ -263,7 +264,7 @@ def restore(
     *,
     extra_replicas: list[Path] | None = None,
     attested_seq: int | None = None,
-) -> dict:
+) -> dict[str, Any]:
     """Restore, then replay deletions, then serve. Fails closed at every step.
 
     Ordering is the safety argument: verify the manifest, prove currency from
@@ -332,10 +333,10 @@ def restore(
     }
 
 
-def list_backups(paths: Paths) -> list[dict]:
+def list_backups(paths: Paths) -> list[dict[str, Any]]:
     if not paths.backups.is_dir():
         return []
-    out = []
+    out: list[dict[str, Any]] = []
     for m in sorted(paths.backups.glob(f"*.{MANIFEST}")):
         manifest = Manifest.load(m)
         out.append(

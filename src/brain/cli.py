@@ -49,7 +49,9 @@ eval_app = typer.Typer(no_args_is_help=True, help="The three evaluation instrume
 backup_app = typer.Typer(no_args_is_help=True, help="Verifiable backup and fail-closed restore.")
 app.add_typer(quarantine_app, name="quarantine")
 app.add_typer(eval_app, name="eval")
+ledger_app = typer.Typer(no_args_is_help=True, help="The off-device tombstone replica.")
 app.add_typer(backup_app, name="backup")
+app.add_typer(ledger_app, name="ledger")
 
 
 def err(msg: str) -> None:
@@ -279,8 +281,9 @@ def validate(state: StateOpt = None) -> None:
         except (InvalidFrontmatter, UnicodeDecodeError) as exc:
             bad.append({"path": str(f), "reason": str(exc)})
     contested = [c.stem for c in p.conflicts.glob("*.json")] if p.conflicts.is_dir() else []
-    emit({"quarantined": bad, "contested": contested})
-    if bad or contested:
+    dangling = deletion.dangling_evidence(p)
+    emit({"quarantined": bad, "contested": contested, "dangling_evidence": dangling})
+    if bad or contested or dangling:
         raise typer.Exit(EXIT_INVALID)
 
 
@@ -371,7 +374,8 @@ def _require_intact_ledgers(p: config.Paths) -> None:
 
 @app.command()
 def forget(
-    memory_id: Annotated[str, typer.Argument()],
+    memory_id: Annotated[str, typer.Argument(help="Memory id, artifact digest, or event id.")],
+    kind: Annotated[str, typer.Option("--kind", help="memory|artifact|event")] = "memory",
     workspace: Annotated[str, typer.Option("--workspace")] = "default",
     type_: Annotated[str, typer.Option("--type")] = "semantic",
     reason: Annotated[
@@ -389,8 +393,17 @@ def forget(
     _require_intact_ledgers(p)
 
     replicator = _replicator(p)
+    if kind not in ("memory", "artifact", "event"):
+        err(f"--kind must be memory, artifact, or event (got {kind!r})")
+        raise typer.Exit(EXIT_INVALID)
     result = deletion.forget(
-        p, memory_id, workspace=workspace, mtype=type_, reason=reason, replicate=replicator
+        p,
+        memory_id,
+        kind=kind,
+        workspace=workspace,
+        mtype=type_,
+        reason=reason,
+        replicate=replicator,
     )
     conn = build.connect(p)
     build.rebuild(p, conn)
@@ -745,6 +758,147 @@ def eval_slope(
     )
     if v.triggered:
         err("TRIGGER MET — this is a decision prompt, not an instruction. A human decides.")
+
+
+@ledger_app.command("init")
+def ledger_init(
+    remote: Annotated[
+        str, typer.Option("--remote", help="e.g. git@github.com:you/brain-ledger.git")
+    ],
+    state: StateOpt = None,
+) -> None:
+    """Configure the off-device tombstone replica.
+
+    Until this runs there is only ONE replica, so quorum can never be met and every
+    deletion stays `pending` forever. That is honest rather than convenient: an
+    unreplicated deletion really is incomplete.
+
+    The remote must reject force-push and deletion, or it is not an anchor — a
+    history that can be rewritten provides no monotonicity. Protection is verified,
+    not assumed, and this command warns loudly when it cannot be confirmed.
+    """
+    from .store.replicate import GitLedgerReplicator
+
+    p = _paths(state)
+    r = GitLedgerReplicator(p)
+    try:
+        r.init_repo(remote)
+    except Exception as exc:
+        err(f"could not initialize the ledger repo: {exc}")
+        raise typer.Exit(EXIT_FAIL_CLOSED) from exc
+
+    protected = r.ensure_protection()
+    emit({"remote": remote, "identity": r.identity, "protection_verified": protected})
+    if not protected:
+        err(
+            "WARNING: could not verify that this remote rejects force-push and branch "
+            "deletion. Acks from an unprotected remote do NOT count toward quorum, so "
+            "deletions will stay pending. For GitHub, `gh` must be authenticated and "
+            "the repo must allow rulesets."
+        )
+        raise typer.Exit(EXIT_PENDING)
+
+
+@ledger_app.command("status")
+def ledger_status(state: StateOpt = None) -> None:
+    """Where the ledger stands, and whether quorum is reachable at all."""
+    from .store.replicate import GitLedgerReplicator
+
+    p = _paths(state)
+    seq, head = ledger.head(p.tombstones)
+    configured = p.ledger_git.exists()
+    r = GitLedgerReplicator(p) if configured else None
+    emit(
+        {
+            "local_seq": seq,
+            "local_head": head,
+            "remote_configured": configured,
+            "remote": r.remote if r else None,
+            "identity": r.identity if r else None,
+            "protection_verified": r.verify_protection() if r and r.remote else False,
+            "pending_deletions": deletion.pending_deletions(p),
+        }
+    )
+    if not configured:
+        err(
+            "No off-device replica configured. Quorum is unreachable, so every deletion "
+            "will report `pending`. Run `brain ledger init --remote <url>`."
+        )
+        raise typer.Exit(EXIT_PENDING)
+    if not (r and r.remote and r.verify_protection()):
+        # A remote whose history can be rewritten is not an anchor, so its acks are
+        # rejected at quorum time. Reporting success here would mean the operator
+        # believes deletions are replicated while every one of them still pends.
+        err(
+            "Replica configured, but its protection against force-push and branch "
+            "deletion could NOT be verified. Acks from an unprotected remote do not "
+            "count toward quorum, so deletions will still report `pending`."
+        )
+        raise typer.Exit(EXIT_PENDING)
+
+
+@app.command()
+def expire(
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", help="Report without changing anything.")
+    ] = False,
+    upcoming_days: Annotated[
+        int, typer.Option("--upcoming", help="Also list what lapses soon.")
+    ] = 14,
+    state: StateOpt = None,
+) -> None:
+    """Lapse what has gone stale, and tombstone what has been expired past its grace.
+
+    Unconfirmed memories decay by design — a store where nothing ever lapses fills
+    with claims nobody confirmed and nobody cited. Expiry is not deletion: an expired
+    memory stops being served but stays recoverable for 90 days.
+    """
+    from .store import lifecycle
+
+    p = _paths(state)
+    _require_intact_ledgers(p)
+    soon = lifecycle.upcoming(p, upcoming_days)
+    if dry_run:
+        from datetime import date as _date
+
+        from .frontmatter import parse as _parse
+
+        would = []
+        for f in sorted(p.memories.rglob("*.md")):
+            if ".revisions" in f.parts or ".staging" in f.parts:
+                continue
+            try:
+                m = _parse(f.read_text(), f)
+            except Exception:
+                continue
+            if reason := lifecycle.is_lapsed(m, _date.today()):
+                would.append({"id": m.id, "reason": reason})
+        emit({"dry_run": True, "would_expire": would, "upcoming": soon})
+        return
+
+    report = lifecycle.sweep(p)
+    conn = build.connect(p)
+    build.rebuild(p, conn)
+    conn.close()
+    emit({**report.as_dict(), "upcoming": soon})
+
+
+@app.command()
+def unexpire(
+    memory_id: Annotated[str, typer.Argument()],
+    state: StateOpt = None,
+) -> None:
+    """Undo a lapse, while the memory is still inside its grace period."""
+    from .store import lifecycle
+
+    p = _paths(state)
+    if not lifecycle.unexpire(p, memory_id):
+        err(f"{memory_id}: not expired, or past its grace period and already purged")
+        raise typer.Exit(EXIT_EMPTY)
+    conn = build.connect(p)
+    build.rebuild(p, conn)
+    conn.close()
+    emit({"id": memory_id, "status": "confirmed"})
 
 
 @app.command()
