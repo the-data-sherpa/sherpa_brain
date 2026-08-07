@@ -230,6 +230,18 @@ async def brain_write(
     dest = mem.present_path(p, workspace, mtype.value, m.id)
     predecessor = None
     if op == "correct":
+        # Checked here as well as in the write protocol, because a correction aimed at
+        # a workspace that does not hold the memory is a caller mistake with an obvious
+        # remedy, and it deserves that remedy rather than a protocol-level error about
+        # displaced state. The protocol keeps its own guard — this one can be bypassed.
+        if not dest.exists():
+            return {
+                "error": (
+                    f"{m.id} has no present file in workspace {workspace!r}. A correction "
+                    f"must target the workspace that holds the memory — re-read it with "
+                    f"brain.get and pass that workspace."
+                )
+            }
         if expected_revision is not None:
             data = revisions.read_revision(p, m.id, expected_revision)
             if data is None:
@@ -254,7 +266,7 @@ async def brain_write(
             workspace=workspace,
             memory_type=mtype.value,
         )
-    except mem.Divergence as exc:
+    except (mem.Divergence, mem.MissingPredecessor) as exc:
         return {"error": str(exc)}
     conn = build.connect(p)
     build.rebuild(p, conn)

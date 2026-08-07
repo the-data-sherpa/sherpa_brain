@@ -60,6 +60,25 @@ class Divergence(Exception):
         )
 
 
+class MissingPredecessor(Exception):
+    """A predecessor was named, but the destination held nothing to displace.
+
+    Distinct from ``Divergence``: there is no second branch and no conflict record,
+    because no committed state was displaced. The new state IS published — the write
+    protocol never discards work — but the caller was editing something other than
+    what it thought, most often a memory that lives in a different workspace.
+    """
+
+    def __init__(self, memory_id: str, revision: int) -> None:
+        self.memory_id, self.revision = memory_id, revision
+        super().__init__(
+            f"{memory_id}: a predecessor was expected, but no present file existed at "
+            f"the destination — nothing was displaced. The new state is published as "
+            f"revision {revision} and nothing was lost. This usually means the memory "
+            f"lives in another workspace; re-read it and retry against that workspace."
+        )
+
+
 @dataclass(frozen=True)
 class WriteResult:
     memory_id: str
@@ -153,6 +172,7 @@ def write(
             create_op(paths, op)
 
         theirs: int | None = None
+        orphaned = False
         try:
             # 3. Publish into the append-only log. Never overwrites.
             n = revisions.publish(paths, memory_id, staged)
@@ -188,6 +208,20 @@ def write(
             # Contested is a *separate* question: did the caller write from a state
             # other than the one it displaced?
             contested = displaced_hash != expected_predecessor
+
+            # ...but only if something was displaced at all. A caller can name a
+            # predecessor for a destination that holds nothing — correcting into the
+            # wrong workspace does exactly that. The rename then *succeeded*, which
+            # consumed `present_tmp`, so the contested branch below would publish a
+            # file that no longer exists, and a conflict record would name a "theirs"
+            # revision that was never written. There is no rival branch here and
+            # nothing was at risk of being overwritten, so this is a stale caller
+            # rather than a divergence — reported as its own error, because silently
+            # accepting a predecessor that could not possibly have matched would make
+            # the token meaningless.
+            if contested and displaced_hash is None:
+                orphaned, contested = True, False
+
             if contested:
                 theirs = _publish_displaced(paths, memory_id, present_tmp)
                 write_conflict(paths, memory_id, ours=n, theirs=theirs, opid=opid)
@@ -199,6 +233,8 @@ def write(
             staged.unlink(missing_ok=True)
             present_tmp.unlink(missing_ok=True)
 
+    if orphaned:
+        raise MissingPredecessor(memory_id, n)
     result = WriteResult(memory_id, n, content_hash(body), opid, contested)
     if contested:
         raise Divergence(memory_id, n, theirs or n)

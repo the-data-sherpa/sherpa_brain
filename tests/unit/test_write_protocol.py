@@ -131,6 +131,42 @@ def test_stale_predecessor_is_a_divergence_not_an_overwrite(paths: Paths) -> Non
     assert b"v2" in joined and b"v3-from-stale" in joined
 
 
+def test_predecessor_against_an_empty_destination_does_not_crash(paths: Paths) -> None:
+    """The contested branch used to assume something *was* displaced.
+
+    When the destination holds nothing, `rename_noreplace` succeeds and consumes the
+    holder, so publishing "their" bytes read a file that no longer existed and the
+    write died with `FileNotFoundError` — after the revision was already published.
+    Correcting a memory into the wrong workspace reaches this exactly.
+    """
+    mem.write(paths, MID, make_body("v1"), None)
+    predecessor = mem.present_hash(mem.present_path(paths, "default", "semantic", MID))
+
+    with pytest.raises(mem.MissingPredecessor):
+        mem.write(paths, MID, make_body("v2"), predecessor, workspace="other")
+
+
+def test_orphaned_write_publishes_its_state_and_writes_no_conflict(paths: Paths) -> None:
+    """No rival branch exists, so a conflict record would name a revision nobody wrote."""
+    mem.write(paths, MID, make_body("v1"), None)
+    predecessor = mem.present_hash(mem.present_path(paths, "default", "semantic", MID))
+
+    with pytest.raises(mem.MissingPredecessor) as exc:
+        mem.write(paths, MID, make_body("v2-orphan"), predecessor, workspace="other")
+
+    assert not mem.is_contested(paths, MID), "a missing predecessor is not a divergence"
+    assert exc.value.revision in revisions.revision_numbers(paths, MID)
+    published = revisions.read_revision(paths, MID, exc.value.revision) or b""
+    assert b"v2-orphan" in published, "the write protocol never discards work"
+    assert not pending_ops(paths), "the op must still retire"
+
+
+def test_create_into_an_empty_destination_is_still_ordinary(paths: Paths) -> None:
+    """The guard must not fire on a create, which legitimately displaces nothing."""
+    r = mem.write(paths, MID, make_body("fresh"), None, workspace="other")
+    assert r.revision_no == 1 and not r.contested
+
+
 def test_revisions_are_never_overwritten(paths: Paths) -> None:
     mem.write(paths, MID, make_body("one"), None)
     first = revisions.read_revision(paths, MID, 1)
