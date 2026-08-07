@@ -24,6 +24,40 @@ Everything else it deliberately does not do. See [`docs/decisions/0004-non-goals
 - **The agent pulls through a tool loop.** Nothing is auto-injected into the prompt prefix.
 - **Models propose, code enforces policy** — and the code says plainly which of the two it can actually validate.
 
+## Who this is for, and who it is not for
+
+**Built for a single trusted operator, on a local-first store, on an encrypted disk.**
+
+The adversary it defends against is *your own agent* — one that has been
+prompt-injected, has read a poisoned document, or is simply confidently wrong. Hence
+pointers-only instruction files, retrieved memories treated as data rather than
+directives, contested memories refused instead of guessed, and deletion that survives
+a backup restore.
+
+It is **not** built for shared or multi-user use, and one consequence deserves to be
+read before you adopt it rather than discovered later:
+
+> The secret scanner rejects credentials and keys — cloud provider keys, service token
+> prefixes, PEM blocks, `Authorization:` headers, URIs with embedded passwords,
+> high-entropy tokens. It **deliberately does not detect** financial identifiers,
+> government IDs, third-party personal data about other people, or health and legal
+> matters. Those are stored as ordinary memories.
+
+That narrowing is defensible when the operator is the only reader of their own store.
+[ADR 0006](docs/decisions/0006-prohibited-data.md) states plainly that it *would not
+be defensible for a shared deployment* — so if you are putting other people's data in
+here, the scanner is not the control you might assume it is.
+
+Two more boundaries worth knowing up front:
+
+- **Workspace scoping is a relevance control, not a security boundary.** Anything with
+  filesystem access reads any memory regardless of workspace.
+- **At-rest encryption is the operating system's job.** The store writes plaintext
+  markdown on purpose; being readable by ordinary tools *is* the portability
+  guarantee. Full-disk encryption is assumed.
+
+[`SECURITY.md`](SECURITY.md) has the full model and the disclosure process.
+
 ## Documentation
 
 | Document | What it is |
@@ -40,8 +74,9 @@ reader than a clean surface.
 ## Status
 
 **Phase 0.5 and Phase 1 complete, plus production hardening.** All fourteen build
-steps, all nineteen acceptance criteria, **182 tests**, mypy strict clean, four runtime
-dependencies.
+steps, all nineteen acceptance criteria, **244 tests** — of which 26 fork and
+`os._exit` mid-protocol to prove crash safety, and 9 check conformance against a
+generic MCP client — mypy strict clean, four runtime dependencies.
 
 ```
 brain init / doctor / install-timers      brain forget <id> [--kind artifact|event]
@@ -73,8 +108,89 @@ Every personal knowledge system that failed, failed of disuse rather than corrup
 `brain doctor` warns on an empty store for that reason. Closing it properly means
 Phase 2 background extraction, which needs model calls you deferred.
 
-## Requirements
+## Prerequisites
 
-Python 3.12+, `ripgrep`, `git`, and a local filesystem supporting atomic rename and
-`RENAME_EXCHANGE`. The store refuses to start on network filesystems and sync folders —
-see [`src/brain/config.py`](src/brain/config.py).
+`install.sh` checks every one of these before it changes anything, and names what is
+missing rather than failing partway through.
+
+| | Why it is needed | Without it |
+|---|---|---|
+| **Linux or macOS** | The write protocol needs an atomic path exchange | Refused at `init` |
+| **Python 3.12+** | `tomllib`, PEP 604 unions, modern typing | Refused; `uv python install 3.12` fixes it |
+| **`uv`** | Installs the CLI into an isolated tool environment | Refused |
+| **`git`** | The tombstone ledger *is* a git repository | Refused |
+| **`ripgrep`** (`rg`) | The rung-0 search backend | Refused |
+| **`jq`** | The Claude Code hooks parse their JSON input with it | Refused |
+| `gh` *(optional)* | Only to create the ledger repository | Do it by hand |
+| `systemd` / `launchd` | Scheduled sweeps | `--skip-timers`; sweep by hand |
+
+```bash
+# Arch / Omarchy
+sudo pacman -S git ripgrep jq && curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Debian / Ubuntu
+sudo apt-get install git ripgrep jq && curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# macOS
+brew install git ripgrep jq uv
+```
+
+There are **four runtime Python dependencies** — `typer`, `pyyaml`, `jsonschema`,
+`mcp`. No embedding library, no vector store, no reranker, no TUI framework. That
+budget is a design constraint recorded in `IMPLEMENTATION-PLAN.md` §2.1, not an
+accident of scope.
+
+### Two constraints that are properties of the design, not a package list
+
+**Linux and macOS only.** The exchange primitive is `renameat2(RENAME_EXCHANGE)` on
+Linux and `renamex_np(RENAME_SWAP)` on macOS; durability is `fsync` on Linux and
+`F_FULLFSYNC` on macOS, because Darwin's `fsync` returns before the drive has
+committed. There is no portable spelling and no safe fallback — emulating an exchange
+with two renames reopens the window it exists to close — so an unsupported kernel is
+refused at `init` rather than served a weaker primitive that looks like it works.
+
+**A local filesystem.** The store refuses to start on network filesystems and sync
+folders. A sync client rewrites files behind the process, which breaks compare-and-swap
+and the immutability of revisions — and it does so without failing a single syscall,
+which is why there is a denylist and not only a probe. See
+[`src/brain/config.py`](src/brain/config.py).
+
+
+## Install
+
+```bash
+git clone <this repo> && cd brain
+./install.sh
+```
+
+One idempotent script: checks prerequisites, installs the CLI into an isolated `uv`
+tool environment, creates the store, writes the scheduler units, and wires whichever
+agent harnesses it finds on your `PATH`. Re-running it is a no-op — verified in CI,
+because an installer you are afraid to re-run is one you will not run at 1am.
+
+```bash
+./install.sh --dry-run                       # print every step, change nothing
+./install.sh --harness claude,codex          # instead of autodetecting
+./install.sh --ledger-remote git@github.com:you/brain-ledger.git
+```
+
+It deliberately does **not** create the ledger repository, enable the timers, or touch
+anything outside `$HOME`. No `sudo`, no system units.
+
+### Harness support
+
+`brain adapter <target> --scope user` wires every session; `--scope repo` wires one
+checkout. Both are pointers-only by construction (§11.3), enforced in CI.
+
+| Harness | Instructions | Skill | MCP server | Consult/capture hooks |
+|---|---|---|---|---|
+| Claude Code | `CLAUDE.md` | ✓ | `~/.claude.json` | ✓ |
+| Codex | `AGENTS.md` | ✓ | `~/.codex/config.toml` | — |
+| OpenCode | `AGENTS.md` | — | `opencode.json` | — |
+| omp | `RULES.md` | ✓ | `~/.omp/agent/mcp.json` | — |
+| pi | `AGENTS.md` | ✓ | **none — pi has no MCP client** | — |
+
+Each row is a different schema for the same three facts, and a config in the wrong
+schema is not an error: it parses, it is ignored, and nothing tells you. That silent
+no-op is what the per-harness targets exist to prevent — which is also why `pi` gets
+no MCP file rather than a generic one.

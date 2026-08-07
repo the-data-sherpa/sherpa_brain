@@ -1,27 +1,90 @@
+# -- Python -------------------------------------------------------------------
 __pycache__/
 *.py[cod]
+*.so
 .venv/
+venv/
+env/
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
+.tox/
+.nox/
 *.egg-info/
 dist/
 build/
 .coverage
+.coverage.*
+coverage.xml
 htmlcov/
 
-# Generated adapter output — regenerated, never authored (§11.3)
-.mcp.json
-CLAUDE.md
+# `uv.lock` is deliberately NOT ignored. Reproducible installs on a machine that
+# has never seen this project are the whole point of `install.sh`, and a lockfile
+# is what makes "it worked on mine" transferable.
 
-# Canonical mutable state lives entirely OUTSIDE this repo, at
-# $XDG_STATE_HOME/brain/. Nothing here should ever reference it, but
-# these guards catch an accidental `brain init --state .` mistake.
-memories/
-events/
-artifacts/
-tombstones.jsonl
-acks.jsonl
-purges.jsonl
-brain.sqlite3*
-uv.lock
+# -- Generated adapter output (§11.3) -----------------------------------------
+# Written by `brain adapter <target> --repo .`, regenerated on demand, never
+# authored. Committing them would freeze an absolute interpreter path from
+# whichever machine ran the generator last — which is precisely the coupling the
+# tool-venv install exists to remove.
+/AGENTS.md
+/CLAUDE.md
+/.mcp.json
+/opencode.json
+/.codex/
+/.omp/
+adapters-touched.json
+*.pre-brain.bak
+
+# -- Personal harness and editor settings -------------------------------------
+# `settings.local.json` is the per-machine half of a Claude Code project config:
+# absolute paths, personal permission grants. Never publishable.
+.claude/settings.local.json
+.claude/*.local.json
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# -- Environment and credentials ----------------------------------------------
+# Nothing here should ever hold a secret, but an installer that writes to $HOME
+# invites people to keep a scratch .env next to it. Refuse it by default.
+.env
+.env.*
+!.env.example
+.envrc
+.direnv/
+*.pem
+*.key
+
+# -- OS junk -------------------------------------------------------------------
+.DS_Store
+.DS_Store?
+._*
+Thumbs.db
+desktop.ini
+
+# -- Canonical store state -----------------------------------------------------
+# Mutable state lives entirely OUTSIDE this repository, at $XDG_STATE_HOME/brain.
+# That is enforced by `config.py`, not by this file. These entries are guards
+# against one specific accident — `brain init --state .` — because git makes
+# erasure maximally hard and forgetting is a stated goal of the project.
+# Anchored to the repository root so they cannot shadow a package directory —
+# an unanchored `ops/` would silently swallow `src/brain/ops/` the day someone
+# turns that module into a package.
+/memories/
+/events/
+/artifacts/
+/quarantine/
+/conflicts/
+/locks/
+/backups/
+/logs/
+/ops/
+/ledger.git/
+/tombstones.jsonl
+/acks.jsonl
+/purges.jsonl
+/idempotency.json
+/brain.sqlite3*
