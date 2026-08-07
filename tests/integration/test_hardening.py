@@ -320,9 +320,16 @@ def test_timer_units_are_user_scoped_and_reference_this_store(
     paths: Paths, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """User units, never system units — a root service would have more access to
-    your memories than you do."""
+    your memories than you do.
+
+    This asserts the *systemd* unit content, so it pins the systemd writer rather
+    than inheriting the host's platform. Otherwise it passes on Linux and fails on
+    macOS, where `install_user_timers` correctly writes LaunchAgents instead — the
+    macOS equivalents of these properties are asserted in test_platform_support.py.
+    """
     from brain import ops
 
+    monkeypatch.setattr(ops, "running_on_darwin", lambda: False)
     monkeypatch.setattr(ops, "UNIT_DIR", tmp_path / "systemd" / "user")
     written = ops.install_user_timers(paths)
     assert written
