@@ -11,7 +11,15 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    # macOS is not decoration. The write protocol uses a *different* syscall there
+    # (renamex_np rather than renameat2) and a different durability barrier
+    # (F_FULLFSYNC rather than fsync). Those paths are unreachable on Linux, so
+    # without this matrix entry "supported on macOS" would be an untested claim.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
@@ -53,24 +61,51 @@ jobs:
       - name: generated adapters must contain pointers only
         run: |
           uv run python - <<'PY'
-          import sys, tempfile
+          import os, sys, tempfile
           from pathlib import Path
           sys.path.insert(0, "src")
           from brain import adapters
           from brain.config import Paths
 
           root = Path(tempfile.mkdtemp())
-          failures = []
-          for target in ("claude", "codex"):
-              for a in adapters.generate(Paths(root), target, root):
-                  try:
-                      adapters.assert_pointers_only(a.content, target)
-                  except adapters.AdapterPurityError as exc:
-                      failures.append(str(exc))
+          # User scope reads (and would write to) $HOME. Point it somewhere
+          # disposable: this job checks content, not placement.
+          os.environ["HOME"] = str(root)
+          os.environ["XDG_CONFIG_HOME"] = str(root / ".config")
+
+          # Every target, both scopes, driven off TARGETS rather than a hardcoded
+          # list — a new harness must not be able to join without being checked.
+          failures, checked = [], 0
+          for target in adapters.TARGETS:
+              for scope in adapters.SCOPES:
+                  for a in adapters.generate(Paths(root), target, root, scope=scope):
+                      checked += 1
+                      try:
+                          adapters.assert_pointers_only(
+                              a.content, target, vendored=a.vendored
+                          )
+                      except adapters.AdapterPurityError as exc:
+                          failures.append(f"{target}/{scope}: {exc}")
           if failures:
               print("\n".join(failures))
               sys.exit(1)
-          print("adapter output is pointers-only")
+          print(f"adapter output is pointers-only ({checked} files)")
+          PY
+
+      - name: vendored harness files are checked too
+        run: |
+          uv run python - <<'PY'
+          import sys
+          sys.path.insert(0, "src")
+          from brain import adapters
+
+          # harness/SKILL.md is copied verbatim into every harness's skill
+          # directory, which makes it an instruction file like any other. Being
+          # committed is what earns it the front-matter allowance, not an exemption
+          # from the check.
+          skill = adapters.harness_dir() / "SKILL.md"
+          adapters.assert_pointers_only(skill.read_text(), "vendored", vendored=True)
+          print("vendored skill is pointers-only")
           PY
 
       - name: the purity check must actually reject content
@@ -91,3 +126,98 @@ jobs:
           print("FAIL: purity check accepted memory content")
           sys.exit(1)
           PY
+
+  bootstrap:
+    # "Installs on a fresh system" is a claim about a machine nobody has run yet,
+    # so it is worth testing on a machine nobody has run yet. A clean runner with a
+    # sandboxed HOME is the closest available thing.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+
+      - name: install ripgrep and jq
+        run: |
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            brew install ripgrep jq
+          else
+            sudo apt-get update && sudo apt-get install -y ripgrep jq
+          fi
+
+      - name: shell syntax
+        run: |
+          bash -n install.sh
+          bash -n harness/hooks/brain-context.sh
+          bash -n harness/hooks/brain-capture.sh
+
+      - name: bootstrap into a sandboxed HOME
+        run: |
+          set -euo pipefail
+          SANDBOX="$RUNNER_TEMP/fresh"
+          mkdir -p "$SANDBOX/.local/bin"
+          # Every harness target is forced rather than detected: the runner has none
+          # installed, and the point is to exercise all five writers.
+          env HOME="$SANDBOX" \
+              PATH="$SANDBOX/.local/bin:$PATH" \
+              XDG_CONFIG_HOME="$SANDBOX/.config" \
+              XDG_STATE_HOME="$SANDBOX/.local/state" \
+              UV_TOOL_BIN_DIR="$SANDBOX/.local/bin" \
+              UV_TOOL_DIR="$SANDBOX/.local/share/uv/tools" \
+            ./install.sh --harness claude,codex,opencode,pi,omp --skip-timers
+
+      - name: the store works after a cold install
+        run: |
+          set -euo pipefail
+          SANDBOX="$RUNNER_TEMP/fresh"
+          run() { env HOME="$SANDBOX" PATH="$SANDBOX/.local/bin:$PATH" \
+                      XDG_STATE_HOME="$SANDBOX/.local/state" "$@"; }
+          run brain remember "a memory written on a cold install" --volatility slow
+          run brain search "cold install" | grep -q "cold install"
+          # Exit 3 is warnings (no replica, no backup yet) and is expected here.
+          # Exit 4 means a safety property is not holding and must fail the build.
+          # Written as `if`, not `[ ] && { }` — the latter returns 1 in the normal
+          # case, which under `set -e` fails the job it was meant to pass.
+          set +e; run brain doctor >/dev/null; code=$?; set -e
+          if [ "$code" -eq 4 ]; then
+            echo "doctor reports a broken safety property"
+            run brain doctor
+            exit 1
+          fi
+          echo "cold install is operable (doctor exit $code)"
+
+      - name: the consult hook fires
+        run: |
+          set -euo pipefail
+          SANDBOX="$RUNNER_TEMP/fresh"
+          out=$(echo '{"prompt":"what happened on the cold install"}' \
+            | env HOME="$SANDBOX" PATH="$SANDBOX/.local/bin:$PATH" \
+                  XDG_STATE_HOME="$SANDBOX/.local/state" \
+                  bash "$SANDBOX/.claude/hooks/brain-context.sh")
+          echo "$out" | grep -q additionalContext
+          echo "hook returned pointers"
+
+      - name: re-running changes nothing
+        run: |
+          set -euo pipefail
+          SANDBOX="$RUNNER_TEMP/fresh"
+          # Only the harness wiring is compared. The store legitimately changes on
+          # every run — indexes, WAL, idempotency records — and folding that in
+          # would make this assert something it does not mean.
+          wiring() {
+            find "$SANDBOX/.claude" "$SANDBOX/.claude.json" "$SANDBOX/.codex" \
+                 "$SANDBOX/.config/opencode" "$SANDBOX/.pi" "$SANDBOX/.omp" \
+                 -type f 2>/dev/null | sort | xargs shasum
+          }
+          before=$(wiring)
+          env HOME="$SANDBOX" PATH="$SANDBOX/.local/bin:$PATH" \
+              XDG_CONFIG_HOME="$SANDBOX/.config" XDG_STATE_HOME="$SANDBOX/.local/state" \
+              UV_TOOL_BIN_DIR="$SANDBOX/.local/bin" \
+              UV_TOOL_DIR="$SANDBOX/.local/share/uv/tools" \
+            ./install.sh --harness claude,codex,opencode,pi,omp --skip-timers
+          after=$(wiring)
+          # An installer you are afraid to re-run is one you will not run at 1am.
+          diff <(echo "$before") <(echo "$after") && echo "second run is a no-op"

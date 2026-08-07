@@ -21,7 +21,7 @@ Open questions in `BLUEPRINT.md` §19, or absent from it entirely. Settled; not 
 | 4 | Review surface | **CLI in Phase 1; TUI deferred to Phase 2** (revised — §0.2) | §8.2 |
 | 5 | Workspace model | **Field + directory-per-workspace** | §11.6 |
 | 6 | Prohibited data | **Credentials and keys only** | §11.4, §19 Q3 |
-| 7 | Harness adapters | **Claude Code + Codex**, plus generic-MCP conformance test | §12.3, §16 |
+| 7 | Harness adapters | **Claude Code + Codex + OpenCode** (revised — §0.2), plus generic-MCP conformance test | §12.3, §16 |
 | 8 | Eval seed | **Scaffold + `brain eval bootstrap`** from the real corpus | §10.1 |
 | 9 | Tombstone replica 2 | **Private GitHub `brain-ledger`**, append-only ref, ack by re-read | §11.5.3 |
 | 10 | Backup | **Auto-detect: btrfs snapshot preferred, validated double-collection fallback** | §11.5.2 |
@@ -37,6 +37,7 @@ Open questions in `BLUEPRINT.md` §19, or absent from it entirely. Settled; not 
 
 - **TUI dropped from Phase 1.** Phase 1 needs divergences and quarantine *surfaced* (invariant 10), not a TUI to surface them. Plain CLI suffices; `textual` leaves the dependency list. TUI + proposal queue move to Phase 2, when something actually generates proposals.
 - **`--force-local` removed entirely.** See §0.3 / Step 10.
+- **OpenCode added as a third adapter target** (2026-08-04), under the promotion clause in `0004-non-goals.md` rather than as new planned scope. Two adapters was the right count for the evidence available when the table above was written; OpenCode turned out to satisfy the promotion test the ADR already specified. It reads `AGENTS.md` natively, but its MCP block is a distinct schema (`mcp`, one argv array, `environment`), and the generic `.mcp.json` is *silently ignored* rather than rejected — the failure mode the conformance test cannot catch, because a generic MCP client never reads the harness's config file. Cursor and Aider remain contingency; the bar for them is the same demonstrated mismatch, not usage.
 
 ### 0.3 Blueprint defects this plan surfaced
 

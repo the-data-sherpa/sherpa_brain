@@ -25,7 +25,7 @@ Storage is not one of them.
 | Non-goal | Reason |
 |---|---|
 | Rebuilding what the harness ships | No custom context injector, no custom skill loader, no reimplementation of `CLAUDE.md` semantics |
-| Harness-specific adapters as planned scope | `AGENTS.md` + one MCP server + one CLI covers every target by construction. Cursor / OpenCode / Aider are contingency work, done on demonstrated breakage |
+| Harness-specific adapters as planned scope | `AGENTS.md` + one MCP server + one CLI covers every target by construction. Cursor / Aider are contingency work, done on demonstrated breakage. OpenCode was promoted under the clause below — see the amendment |
 | Automatic entity resolution | Documented as unsolved in production. At single-user scale a hand-maintained alias list of ~200 entries beats a model |
 | Multi-user, ACLs, concurrent writers in v1 | `workspace` and `owner` fields carried from day one so migration is not a data-model rewrite |
 | Vector server, graph database, reranker | Gated on measured triggers in `0002-migration-triggers.md` |
@@ -49,3 +49,9 @@ Real isolation requires directory-per-workspace with OS permissions (available, 
 - A harness removing file-based memory or MCP support, which would move "don't rebuild what the harness ships" from prudent to impossible.
 - A second human using the system, which converts the multi-user non-goal into a requirement and makes workspace-as-security-boundary necessary rather than overclaimed.
 - Demonstrated breakage in a specific harness, which promotes that one adapter from contingency to scope — for that adapter only, not the matrix.
+
+## Amendment — 2026-08-04: OpenCode promoted
+
+The clause above fired. OpenCode is in daily use by the operator, and the convention-covers-it argument holds for only half of it: it reads `AGENTS.md` natively, but its MCP configuration is a different schema — `mcp` rather than `mcpServers`, `command` as a single argv array, `environment` rather than `env`. The generic `.mcp.json` is not rejected by OpenCode; it is *ignored*, which makes the breakage silent rather than loud, and silent is the case worth spending a target on.
+
+Promoted for OpenCode only. Cursor and Aider remain contingency. The adapter merges into an existing `opencode.json` rather than overwriting it, because unlike `.mcp.json` that file is the harness's main config and holds unrelated user settings.

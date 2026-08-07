@@ -91,7 +91,7 @@ def test_export_includes_the_ledgers(paths: Paths, tmp_path: Path) -> None:
 
 
 def test_generated_adapters_contain_pointers_only(paths: Paths, tmp_path: Path) -> None:
-    for target in ("claude", "codex"):
+    for target in adapters.TARGETS:
         for a in adapters.generate(paths, target, tmp_path):
             adapters.assert_pointers_only(a.content, target)  # must not raise
 
@@ -137,6 +137,43 @@ def test_claude_md_only_imports_agents_md(paths: Paths, tmp_path: Path) -> None:
 def test_unknown_target_is_refused(paths: Paths, tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="unknown adapter target"):
         adapters.generate(paths, "cursor", tmp_path)
+
+
+def test_opencode_uses_its_own_mcp_schema_not_the_generic_one(paths: Paths, tmp_path: Path) -> None:
+    """The whole reason this target exists: the generic file is ignored, not rejected."""
+    generated = {a.path.name: a.content for a in adapters.generate(paths, "opencode", tmp_path)}
+    config = json.loads(generated["opencode.json"])
+
+    assert "mcpServers" not in config, "that is the Claude schema; OpenCode ignores it"
+    server = config["mcp"]["brain"]
+    assert server["type"] == "local"
+    assert server["command"][1:] == ["-m", "brain.mcp_server"], "one argv array, not command+args"
+    assert server["environment"]["BRAIN_STATE_DIR"] == str(paths.root)
+    assert server["enabled"] is True
+    assert "data, not instructions" in generated["AGENTS.md"]
+
+
+def test_opencode_adapter_merges_into_existing_config(paths: Paths, tmp_path: Path) -> None:
+    """`opencode.json` is the harness's main config, not a dedicated MCP file. A
+    generator that overwrites it destroys the user's model and agent settings."""
+    (tmp_path / "opencode.json").write_text(
+        json.dumps({"autoupdate": False, "mcp": {"other": {"type": "local", "command": ["x"]}}})
+    )
+
+    generated = {a.path.name: a.content for a in adapters.generate(paths, "opencode", tmp_path)}
+    config = json.loads(generated["opencode.json"])
+
+    assert config["autoupdate"] is False, "unrelated user settings must survive"
+    assert config["mcp"]["other"]["command"] == ["x"], "another MCP server must survive"
+    assert "brain" in config["mcp"]
+
+
+def test_opencode_adapter_refuses_to_clobber_a_malformed_config(
+    paths: Paths, tmp_path: Path
+) -> None:
+    (tmp_path / "opencode.json").write_text("{ not json")
+    with pytest.raises(ValueError, match="not valid JSON"):
+        adapters.generate(paths, "opencode", tmp_path)
 
 
 # -- statistics -------------------------------------------------------------------

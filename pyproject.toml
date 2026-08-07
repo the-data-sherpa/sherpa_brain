@@ -35,6 +35,13 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/brain"]
 
+# The vendored harness assets live at the repository root because they are meant to
+# be read and reviewed there, not buried in a package. A wheel still needs them —
+# `brain adapter --scope user` copies them out — so they ride along as package data.
+# `adapters.harness_dir()` checks both locations for exactly this reason.
+[tool.hatch.build.targets.wheel.force-include]
+"harness" = "brain/_harness"
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]

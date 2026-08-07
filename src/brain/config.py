@@ -11,7 +11,9 @@ mechanisms, and neither alone is sufficient — see ``check_preconditions``.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -21,7 +23,27 @@ from .atomic import Capabilities, probe_capabilities
 # sometimes. A capability probe cannot detect these reliably: a sync client's
 # directory looks like any other directory to a syscall.
 UNSAFE_FSTYPES = frozenset(
-    {"nfs", "nfs4", "cifs", "smbfs", "smb3", "fuse.sshfs", "fuse.s3fs", "fuse.rclone", "9p", "afs"}
+    {
+        # Linux spellings
+        "nfs",
+        "nfs4",
+        "cifs",
+        "smbfs",
+        "smb3",
+        "fuse.sshfs",
+        "fuse.s3fs",
+        "fuse.rclone",
+        "9p",
+        "afs",
+        # macOS spellings for the same hazards. `mount` reports these differently
+        # from /proc/mounts, and a set that only knows the Linux names would let a
+        # mounted share through on a Mac while looking like it had checked.
+        "afpfs",
+        "webdav",
+        "osxfuse",
+        "macfuse",
+        "lifs",
+    }
 )
 
 # Directory names managed by file-sync clients. These rewrite files behind the
@@ -38,6 +60,11 @@ SYNC_DIR_MARKERS = (
     "pCloud",
     "Sync",
 )
+
+
+#: Kernels for which ``atomic.py`` implements the exchange primitive. Anything else
+#: is refused at ``init`` rather than allowed to discover the gap mid-write.
+SUPPORTED_PLATFORMS = frozenset({"linux", "darwin"})
 
 
 class PreconditionError(RuntimeError):
@@ -197,19 +224,14 @@ def default_workspace(cwd: Path | None = None) -> str:
     return "default"
 
 
-def fstype_of(path: Path) -> str | None:
-    """Best-effort filesystem type for the mount containing ``path``."""
-    try:
-        entries = Path("/proc/mounts").read_text().splitlines()
-    except OSError:
-        return None
-    target = path.resolve()
+def _deepest_mount(target: Path, mounts: list[tuple[Path, str]]) -> str | None:
+    """The fstype of the longest mount point that is a prefix of ``target``.
+
+    Longest wins because mount points nest: ``/`` matches everything, so a bind or
+    network mount deeper down would be masked by taking the first hit.
+    """
     best: tuple[int, str] | None = None
-    for line in entries:
-        parts = line.split()
-        if len(parts) < 3:
-            continue
-        mount, fstype = Path(parts[1]), parts[2]
+    for mount, fstype in mounts:
         try:
             if target == mount or mount in target.parents:
                 depth = len(mount.parts)
@@ -218,6 +240,60 @@ def fstype_of(path: Path) -> str | None:
         except (OSError, ValueError):
             continue
     return best[1] if best else None
+
+
+def _linux_mounts() -> list[tuple[Path, str]]:
+    try:
+        entries = Path("/proc/mounts").read_text().splitlines()
+    except OSError:
+        return []
+    out = []
+    for line in entries:
+        parts = line.split()
+        if len(parts) >= 3:
+            out.append((Path(parts[1]), parts[2]))
+    return out
+
+
+#: ``mount`` on Darwin prints ``<device> on <point> (<fstype>, <opts…>)``. The mount
+#: point may contain spaces, so the split is anchored on the parenthesised tail
+#: rather than on whitespace.
+_DARWIN_MOUNT_LINE = re.compile(r"^(?P<dev>.+?) on (?P<point>.+?) \((?P<opts>[^)]*)\)\s*$")
+
+
+def _darwin_mounts() -> list[tuple[Path, str]]:
+    """Parse ``mount(8)``. macOS has no /proc, and no stdlib call returns an fstype.
+
+    Without this the denylist degrades to the sync-folder markers alone on macOS —
+    it would return None for every path and quietly approve an NFS or SMB share,
+    which is the one thing the denylist exists to catch that a probe cannot.
+    """
+    try:
+        proc = subprocess.run(
+            ["/sbin/mount"], capture_output=True, text=True, timeout=5, check=False
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if proc.returncode != 0:
+        return []
+    out = []
+    for line in proc.stdout.splitlines():
+        if match := _DARWIN_MOUNT_LINE.match(line):
+            opts = match.group("opts").split(",")
+            if opts:
+                out.append((Path(match.group("point")), opts[0].strip()))
+    return out
+
+
+def fstype_of(path: Path) -> str | None:
+    """Best-effort filesystem type for the mount containing ``path``."""
+    if sys.platform == "darwin":
+        mounts = _darwin_mounts()
+    else:
+        mounts = _linux_mounts()
+    if not mounts:
+        return None
+    return _deepest_mount(path.resolve(), mounts)
 
 
 def denylist_reason(path: Path) -> str | None:
@@ -253,6 +329,12 @@ def check_preconditions(root: Path) -> Capabilities:
     Neither establishes crash durability. That is assumed, not proven, and stated
     in ADR 0005 as accepted residual risk rather than engineered around.
     """
+    if sys.platform not in SUPPORTED_PLATFORMS and not sys.platform.startswith("linux"):
+        raise PreconditionError(
+            f"{sys.platform} is not supported. The write protocol needs an atomic "
+            f"path-exchange primitive, which brain implements for Linux "
+            f"(renameat2) and macOS (renamex_np) only."
+        )
     if reason := denylist_reason(root):
         raise PreconditionError(reason)
     caps = probe_capabilities(root)

@@ -16,6 +16,14 @@ was wrong in an earlier draft of the design:
 
 None of this establishes crash durability. ``fsync()`` returning 0 says nothing about
 lying disks or write caches — see ``probe_capabilities`` and IMPLEMENTATION-PLAN §0.5.
+
+Two kernels are supported, and the swap primitive is where they diverge. Linux spells
+it ``renameat2(RENAME_EXCHANGE)``, reached by raw syscall because glibc only wrapped
+it in 2.28. macOS spells it ``renamex_np(RENAME_SWAP)``, a real libc function. There
+is no portable spelling, and there is no safe fallback: emulating an exchange with two
+renames reintroduces exactly the window the exchange exists to close. So an
+unsupported platform is refused at import rather than served a weaker primitive that
+looks like it works.
 """
 
 from __future__ import annotations
@@ -25,6 +33,7 @@ import ctypes
 import ctypes.util
 import errno
 import os
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -32,7 +41,26 @@ AT_FDCWD = -100
 RENAME_NOREPLACE = 1 << 0
 RENAME_EXCHANGE = 1 << 1
 
+#: macOS ``renamex_np`` flags, from ``sys/stdio.h``. Different values *and* different
+#: bit positions from the Linux ones above, which is why they are named separately
+#: rather than reused.
+RENAME_SWAP = 0x00000002
+RENAME_EXCL = 0x00000004
+
+#: ``fcntl.h``. On macOS, ``fsync`` returns once the data reaches the drive, not once
+#: the drive has committed it; ``F_FULLFSYNC`` is the barrier that actually flushes
+#: the write cache. Apple documents this. Using plain ``fsync`` on Darwin would make
+#: durability meaningfully weaker than on Linux while looking identical in the code.
+F_FULLFSYNC = 51
+
+_IS_LINUX = sys.platform.startswith("linux")
+_IS_DARWIN = sys.platform == "darwin"
+
 _libc: ctypes.CDLL | None = None
+
+
+class UnsupportedPlatform(RuntimeError):
+    """The write protocol's primitives do not exist on this kernel."""
 
 
 def _libc_handle() -> ctypes.CDLL:
@@ -43,6 +71,29 @@ def _libc_handle() -> ctypes.CDLL:
     return _libc
 
 
+def _oserror(old: Path, new: Path) -> OSError:
+    err = ctypes.get_errno()
+    return OSError(err, os.strerror(err), str(old), None, str(new))
+
+
+# renameat2 syscall numbers, per architecture. A missing entry is left as None on
+# purpose: defaulting to some other architecture's number does not degrade to a
+# failed rename, it issues *a different syscall*. Refusing is the only safe answer.
+_RENAMEAT2_BY_MACHINE = {
+    "x86_64": 316,
+    "aarch64": 276,
+    "armv7l": 382,
+    "ppc64le": 357,
+    "s390x": 347,
+    "riscv64": 276,
+    "i686": 353,
+    "loongarch64": 276,
+}
+_RENAMEAT2_NR: int | None = (
+    _RENAMEAT2_BY_MACHINE.get(os.uname().machine) if hasattr(os, "uname") else None
+)
+
+
 def _renameat2(old: Path, new: Path, flags: int) -> None:
     """Call renameat2(2) directly.
 
@@ -51,6 +102,12 @@ def _renameat2(old: Path, new: Path, flags: int) -> None:
     paths, which is what lets a writer capture whatever was actually present at the
     moment it displaced it.
     """
+    if _RENAMEAT2_NR is None:
+        raise UnsupportedPlatform(
+            f"no renameat2 syscall number known for {os.uname().machine!r}. "
+            "The write protocol needs RENAME_EXCHANGE; guessing a syscall number "
+            "would call something else entirely."
+        )
     libc = _libc_handle()
     ctypes.set_errno(0)
     res = libc.syscall(
@@ -62,20 +119,39 @@ def _renameat2(old: Path, new: Path, flags: int) -> None:
         ctypes.c_uint(flags),
     )
     if res != 0:
-        err = ctypes.get_errno()
-        raise OSError(err, os.strerror(err), str(old), None, str(new))
+        raise _oserror(old, new)
 
 
-# renameat2 syscall numbers, per architecture.
-_RENAMEAT2_BY_MACHINE = {
-    "x86_64": 316,
-    "aarch64": 276,
-    "armv7l": 382,
-    "ppc64le": 357,
-    "s390x": 347,
-    "riscv64": 276,
-}
-_RENAMEAT2_NR = _RENAMEAT2_BY_MACHINE.get(os.uname().machine, 316)
+def _renamex_np(old: Path, new: Path, flags: int) -> None:
+    """macOS's exchange primitive. A real libc export, unlike the Linux one."""
+    libc = _libc_handle()
+    ctypes.set_errno(0)
+    res = libc.renamex_np(
+        ctypes.c_char_p(os.fsencode(old)),
+        ctypes.c_char_p(os.fsencode(new)),
+        ctypes.c_uint(flags),
+    )
+    if res != 0:
+        raise _oserror(old, new)
+
+
+def _fsync(fd: int) -> None:
+    """Flush a descriptor as durably as this kernel allows.
+
+    On Darwin that means ``F_FULLFSYNC``, with a fall back to ``fsync`` when the
+    filesystem does not implement it (some network and virtual filesystems return
+    ENOTTY/ENOTSUP) — those are already denylisted, so the fallback is for the odd
+    local case rather than a durability loophole.
+    """
+    if _IS_DARWIN:
+        import fcntl
+
+        try:
+            fcntl.fcntl(fd, F_FULLFSYNC)
+            return
+        except OSError:
+            pass
+    os.fsync(fd)
 
 
 def fsync_dir(path: Path) -> None:
@@ -86,7 +162,7 @@ def fsync_dir(path: Path) -> None:
     """
     fd = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
     try:
-        os.fsync(fd)
+        _fsync(fd)
     finally:
         os.close(fd)
 
@@ -97,7 +173,7 @@ def write_atomic(path: Path, data: bytes) -> None:
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     try:
         os.write(fd, data)
-        os.fsync(fd)
+        _fsync(fd)
     finally:
         os.close(fd)
     os.replace(tmp, path)
@@ -115,7 +191,7 @@ def write_staged(path: Path, data: bytes) -> None:
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     try:
         os.write(fd, data)
-        os.fsync(fd)
+        _fsync(fd)
     finally:
         os.close(fd)
     fsync_dir(path.parent)
@@ -144,13 +220,26 @@ def exchange(a: Path, b: Path) -> None:
     a writer gets hold of bytes a concurrent editor may have installed, instead of
     destroying them.
     """
-    _renameat2(a, b, RENAME_EXCHANGE)
+    if _IS_DARWIN:
+        _renamex_np(a, b, RENAME_SWAP)
+    elif _IS_LINUX:
+        _renameat2(a, b, RENAME_EXCHANGE)
+    else:
+        raise UnsupportedPlatform(
+            f"{sys.platform} has no atomic path-exchange primitive that brain knows of. "
+            "The write protocol requires one; see atomic.py."
+        )
 
 
 def rename_noreplace(src: Path, dst: Path) -> bool:
     """Rename that refuses to overwrite. Returns False if ``dst`` exists."""
     try:
-        _renameat2(src, dst, RENAME_NOREPLACE)
+        if _IS_DARWIN:
+            _renamex_np(src, dst, RENAME_EXCL)
+        elif _IS_LINUX:
+            _renameat2(src, dst, RENAME_NOREPLACE)
+        else:
+            raise UnsupportedPlatform(f"{sys.platform} has no non-replacing rename primitive.")
     except OSError as exc:
         if exc.errno == errno.EEXIST:
             return False
@@ -225,12 +314,15 @@ def probe_capabilities(directory: Path) -> Capabilities:
             results["atomic_rename"] = c.read_bytes() == b"a"
             os.replace(c, a)
 
-        with contextlib.suppress(OSError):
+        # UnsupportedPlatform as well as OSError: on a kernel with no exchange
+        # primitive the capability is simply absent, and the probe's job is to
+        # report that as a missing capability rather than to crash.
+        with contextlib.suppress(OSError, UnsupportedPlatform):
             exchange(a, b)
             results["rename_exchange"] = a.read_bytes() == b"b" and b.read_bytes() == b"a"
             exchange(a, b)
 
-        with contextlib.suppress(OSError):
+        with contextlib.suppress(OSError, UnsupportedPlatform):
             results["rename_noreplace"] = rename_noreplace(a, b) is False
 
         with contextlib.suppress(OSError):

@@ -9,15 +9,43 @@ rather than what the error says.
 ## 1. First run
 
 ```bash
-uv sync && uv pip install -e .
+./install.sh                    # everything below, in order, idempotently
+```
 
+That is the whole thing on a fresh machine. The rest of this section is what it does
+and how to do each part by hand when you need to.
+
+```bash
+./install.sh --dry-run                              # print, change nothing
+./install.sh --harness claude,pi --scope user       # skip autodetection
+./install.sh --ledger-remote git@github.com:you/brain-ledger.git
+./install.sh --skip-timers                          # no scheduler units
+```
+
+The installer touches nothing outside `$HOME`, needs no `sudo`, and can be re-run
+safely at any time — CI asserts the second run is byte-identical. It will not create
+the ledger repository or enable the timers for you; both are decisions, not steps.
+
+**It installs the CLI with `uv tool install --editable`, not into the project venv.**
+That is load-bearing rather than stylistic. Every generated harness config records an
+absolute interpreter path, and an earlier setup recorded the *project* venv's — so
+recreating that venv broke every harness at once, silently, because the hooks fail
+open. A `uv` tool environment is independent of anything `uv sync` does in the
+checkout.
+
+By hand:
+
+```bash
+uv tool install --editable .    # or: uv sync && uv pip install -e .
 brain init                      # probes the filesystem, refuses unsafe ones
 brain doctor                    # expect WARNs: no replica, no backup, empty store
 ```
 
 `brain init` refuses network filesystems and sync folders. That refusal is not
 conservatism — a sync client rewrites files behind the process, which breaks
-compare-and-swap and the immutability of revisions.
+compare-and-swap and the immutability of revisions. It also refuses any kernel other
+than Linux and macOS, because the write protocol needs an atomic path exchange and
+brain only implements one for those two.
 
 ### 1.1 The off-device replica — do this before you delete anything
 
@@ -45,26 +73,57 @@ The sweeps are correct and useless unscheduled.
 
 ```bash
 brain install-timers --dry-run   # read them first
-brain install-timers
-systemctl --user daemon-reload
-systemctl --user enable --now brain-sync.timer brain-expire.timer brain-backup.timer
-systemctl --user list-timers 'brain-*'
+brain install-timers             # then run the commands it prints
 ```
 
+`install-timers` writes systemd `--user` units on Linux and LaunchAgents on macOS,
+then prints the activation commands for whichever it wrote. **Writing a unit and
+scheduling it are different acts** — nothing runs until you run those commands. Take
+them from the tool's output rather than from memory; the list here was wrong once,
+omitting `brain-expire.timer`, which is the kind of error that shows up months later
+as "why did nothing ever expire".
+
 User units, never system units: this needs no root, and a service running as root
-would have more access to your memories than you do.
+would have more access to your memories than you do. The same rule picks
+`~/Library/LaunchAgents` over `/Library/LaunchDaemons` on macOS.
+
+One caveat on macOS: launchd has no equivalent of `SuccessExitStatus`, so a sweep
+exiting 3 — "a deletion is still pending", a normal state — is logged as a failure.
+Nothing acts on it; the practical effect is a log line.
 
 ### 1.3 Wire it to your agent
 
 ```bash
-brain adapter claude --repo ~/Projects/somewhere
-brain adapter codex  --repo ~/Projects/somewhere
+brain adapter claude --scope user               # every session, this machine
+brain adapter codex  --repo ~/Projects/thing    # one checkout
 ```
+
+Five targets: `claude`, `codex`, `opencode`, `pi`, `omp`. Two scopes: `user` writes
+into the harness's own configuration directory, `repo` into a project.
+
+Each harness spells the same three facts — interpreter, argv, environment — into a
+different schema, and **a config in the wrong schema is not an error**. It parses, it
+is ignored, and nothing tells you. That silent no-op is why there are five targets
+rather than one generic writer, and why `pi` gets *no* MCP config: it ships no MCP
+client, so the store is reachable there through the CLI alone.
+
+Files that belong to another tool (`~/.claude/settings.json`, `~/.codex/config.toml`,
+`opencode.json`) are **merged, never overwritten**, and copied once to
+`<name>.pre-brain.bak` before the first change. Which paths have been touched is
+recorded in `<state>/adapters-touched.json` rather than inferred from whether a backup
+exists — otherwise a second run would save brain's own output under a name claiming
+to be what preceded it.
 
 Generated files carry **pointers only** — never memory content. That is a security
 control, not tidiness: `CLAUDE.md` is loaded as high-trust instruction context, and a
 generator that can inline retrieved content rebuilds the exact path Claude Code
-v2.1.50 removed. CI enforces it.
+v2.1.50 removed. CI enforces it across every target and both scopes.
+
+The one file that is *copied* rather than generated is `harness/SKILL.md`. It carries
+prose a generator has no business inventing, so it reaches an instruction file the
+only way such content may: through a reviewed commit. It is still checked — its front
+matter is validated against a skill-metadata allowlist and stripped, and the body
+faces every memory-content marker.
 
 ---
 
@@ -74,10 +133,16 @@ The gap this closes: nothing is written unless you write it, and "remember to wr
 it" is not a mechanism. Two hooks make consultation and capture structural.
 
 ```bash
-brain install-timers                 # if you have not already
-# hooks live at ~/.claude/hooks/brain-{context,capture}.sh
-# wired in ~/.claude/settings.json under UserPromptSubmit and Stop
+brain adapter claude --scope user    # installs and wires both hooks
 ```
+
+The scripts are committed at `harness/hooks/`, installed to
+`~/.claude/hooks/brain-{context,capture}.sh`, and registered in
+`~/.claude/settings.json` under `UserPromptSubmit` and `Stop`. Re-running rewrites
+those two entries rather than appending — matched by script basename, so moving the
+repository updates the wiring instead of leaving a stale copy shadowing it.
+
+They resolve `brain` from `PATH`, never from a project venv. `BRAIN_BIN` overrides.
 
 **Consult (UserPromptSubmit).** Every prompt is checked against the store. If related
 memories exist you get *pointers* — id, a truncated label, workspace — and an
@@ -293,9 +358,15 @@ is correct, not broken.
 ├── ledger.git/                     → the off-device replica
 ├── quarantine/  conflicts/  ops/   things needing a human
 ├── logs/queries.jsonl              retrieval log (trimmed by `sync`)
+├── adapters-touched.json           which foreign configs we have merged into
 ├── brain.sqlite3                   DERIVED — delete it any time
 └── backups/<generation>/           + <generation>.manifest.json
 ```
+
+Harness wiring lives outside the store, in each harness's own configuration
+directory — `~/.claude/`, `~/.codex/`, `~/.config/opencode/`, `~/.pi/agent/`,
+`~/.omp/agent/`. It is generated, not canonical: delete any of it and re-run
+`brain adapter <target> --scope user`. The committed sources are in `harness/`.
 
 `rm ~/.local/state/brain/brain.sqlite3 && brain reindex` is always safe. That is
 enforced by three tests, not by convention.

@@ -14,6 +14,7 @@ Exit codes are stable and meaningful, because a caller that cannot distinguish
 from __future__ import annotations
 
 import json
+import shutil
 import sys
 from pathlib import Path
 from typing import Annotated
@@ -544,20 +545,32 @@ def export(
 
 @app.command()
 def adapter(
-    target: Annotated[str, typer.Argument(help="claude|codex")],
-    repo: Annotated[str, typer.Option("--repo", help="Repository root.")] = ".",
+    target: Annotated[str, typer.Argument(help="claude|codex|opencode|pi|omp")],
+    repo: Annotated[str, typer.Option("--repo", help="Repository root (--scope repo).")] = ".",
+    scope: Annotated[
+        str, typer.Option("--scope", help="repo|user — user wires every session.")
+    ] = "repo",
     dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
     state: StateOpt = None,
 ) -> None:
     """Generate harness wiring. Pointers only — never memory content (§11.3)."""
     p = _paths(state)
     try:
-        generated = adapters_mod.generate(p, target, Path(repo))
-        written = adapters_mod.write(generated, dry_run=dry_run)
-    except (ValueError, adapters_mod.AdapterPurityError) as exc:
+        planned = adapters_mod.plan(p, target, Path(repo), scope=scope)
+        written = adapters_mod.write(planned.adapters, dry_run=dry_run)
+    except (ValueError, OSError, adapters_mod.AdapterPurityError) as exc:
         err(str(exc))
         raise typer.Exit(EXIT_INVALID) from exc
-    emit({"target": target, "files": written, "dry_run": dry_run})
+
+    # An instruction file is only as portable as the commands it names. User scope
+    # installs files that tell *every* session to run `brain`, so a missing binary
+    # there is half a wiring that fails silently rather than loudly.
+    if scope == "user" and shutil.which("brain") is None:
+        err("warning: `brain` is not on PATH. The installed files name it; wire it up with")
+        err("  uv tool install --editable .")
+    for note in planned.notes:
+        err(f"note: {note}")
+    emit({"target": target, "scope": scope, "files": written, "dry_run": dry_run})
 
 
 @app.command()
@@ -1005,23 +1018,24 @@ def install_timers(
     dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
     state: StateOpt = None,
 ) -> None:
-    """Write systemd --user units so the sweeps actually run.
+    """Write the scheduler units so the sweeps actually run.
 
     `expire`, `sync`, and `backup` are correct and useless unscheduled. Nothing here
-    touches the system: user units, no root, and `--dry-run` prints instead of writing.
+    touches the system: systemd --user units on Linux, LaunchAgents on macOS, no root
+    either way, and `--dry-run` prints instead of writing.
     """
-    from .ops import install_user_timers
+    from .ops import activation_commands, install_user_timers
 
     p = _paths(state)
     written = install_user_timers(p, dry_run=dry_run)
-    emit({"units": written, "dry_run": dry_run})
+    commands = activation_commands()
+    emit({"units": written, "activate": commands, "dry_run": dry_run})
     if not dry_run:
-        err(
-            "Now run:\n"
-            "  systemctl --user daemon-reload\n"
-            "  systemctl --user enable --now brain-sync.timer brain-backup.timer\n"
-            "Check with: systemctl --user list-timers 'brain-*'"
-        )
+        # Writing a unit file schedules nothing. Saying so here, from the same list
+        # the installer prints, is what keeps the two from drifting apart.
+        err("Written, not yet scheduled. Now run:")
+        for command in commands:
+            err(f"  {command}")
 
 
 @app.command()
