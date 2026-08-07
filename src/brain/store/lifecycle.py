@@ -33,6 +33,7 @@ from typing import Any
 from ..config import Paths
 from ..frontmatter import InvalidFrontmatter, parse, serialize
 from ..model import DEFAULT_EXPIRY_DAYS, PROPOSAL_DECAY_DAYS, Memory, Status
+from ..model import today as utc_today
 from . import deletion
 from . import memory as mem
 
@@ -120,7 +121,7 @@ def sweep(
 
     Idempotent, and safe to run on every startup or from cron.
     """
-    today = today or date.today()
+    today = today or utc_today()
     report = Sweep()
     if not paths.memories.is_dir():
         return report
@@ -181,7 +182,7 @@ def upcoming(
     paths: Paths, within_days: int = 14, today: date | None = None
 ) -> list[dict[str, Any]]:
     """What is about to lapse. Surfacing this is what makes decay a policy, not a trap."""
-    today = today or date.today()
+    today = today or utc_today()
     out: list[dict[str, Any]] = []
     if not paths.memories.is_dir():
         return out

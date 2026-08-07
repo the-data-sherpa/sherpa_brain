@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import json
 import sys
-from datetime import date
 from pathlib import Path
 from typing import Annotated
 
@@ -29,6 +28,7 @@ from .frontmatter import InvalidFrontmatter, parse, serialize
 from .ids import new_ulid
 from .index import build
 from .model import Evidence, Memory, MemoryType, ProvenanceClass, Volatility
+from .model import today as model_today
 from .search.fts5 import Fts5Backend
 from .search.ripgrep import RipgrepBackend
 from .store import artifacts, budgets, deletion, events, ledger, reconcile, revisions
@@ -133,7 +133,7 @@ def remember(
             type=MemoryType(type_),
             provenance_class=ProvenanceClass(provenance),
             volatility=Volatility(volatility),
-            valid_from=date.today(),
+            valid_from=model_today(),
             evidence=[Evidence.parse(e) for e in (evidence or ["user:direct"])],
             body=text,
             workspace=workspace,
@@ -875,8 +875,6 @@ def expire(
     _require_intact_ledgers(p)
     soon = lifecycle.upcoming(p, upcoming_days)
     if dry_run:
-        from datetime import date as _date
-
         from .frontmatter import parse as _parse
 
         would = []
@@ -887,7 +885,7 @@ def expire(
                 m = _parse(f.read_text(), f)
             except Exception:
                 continue
-            if reason := lifecycle.is_lapsed(m, _date.today()):
+            if reason := lifecycle.is_lapsed(m, model_today()):
                 would.append({"id": m.id, "reason": reason})
         emit({"dry_run": True, "would_expire": would, "upcoming": soon})
         return

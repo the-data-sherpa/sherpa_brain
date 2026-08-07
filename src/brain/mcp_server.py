@@ -29,7 +29,8 @@ from . import config, scan
 from .frontmatter import content_hash, serialize
 from .ids import new_ulid
 from .index import build
-from .model import Evidence, Memory, MemoryType, ProvenanceClass, Volatility, utcnow
+from .model import Evidence, Memory, MemoryType, ProvenanceClass, Volatility
+from .model import today as model_today
 from .search.fts5 import Fts5Backend
 from .store import budgets, deletion, ledger, revisions
 from .store import memory as mem
@@ -219,7 +220,7 @@ async def brain_write(
             type=mtype,
             provenance_class=ProvenanceClass(provenance_class),
             volatility=Volatility(volatility),
-            valid_from=utcnow().date(),
+            valid_from=model_today(),
             evidence=[Evidence.parse(e) for e in (evidence or ["agent:proposed"])],
             body=content,
             workspace=workspace,

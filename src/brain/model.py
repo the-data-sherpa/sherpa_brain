@@ -133,6 +133,24 @@ def utcnow() -> datetime:
     return datetime.now(UTC)
 
 
+def today() -> date:
+    """Today, in UTC — never ``date.today()``, which is local.
+
+    Every timestamp the store writes is UTC (``recorded_at``, event and tombstone
+    times). Lifecycle decisions compare a "today" against those, so taking today from
+    the local clock mixes two calendars, and the mixture is wrong for exactly as many
+    hours a day as the machine is offset from UTC.
+
+    The symptom is a store that behaves differently in the evening. West of UTC, the
+    stored date rolls over first: a memory recorded "today" in UTC carries tomorrow's
+    date by the local calendar, so ``today >= recorded_at.date()`` is false and a
+    sweep that should tombstone silently does nothing until morning. East of UTC it
+    inverts and things lapse a day early. Neither reports an error; both were doing
+    arithmetic on two different calendars.
+    """
+    return datetime.now(UTC).date()
+
+
 def iso(dt: datetime) -> str:
     """ISO-8601 at millisecond precision.
 
