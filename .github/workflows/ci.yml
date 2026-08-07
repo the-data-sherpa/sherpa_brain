@@ -36,6 +36,15 @@ jobs:
       - name: types
         run: uv run mypy
 
+      # mypy narrows `sys.platform` statically, using the platform it runs on, so
+      # with warn_unreachable each platform's branches look like dead code on the
+      # other. Checking the cross-platform view here means a Linux contributor
+      # catches it before the macOS matrix job does.
+      - name: types (cross-platform view)
+        run: |
+          uv run mypy --platform darwin
+          uv run mypy --platform linux
+
       - name: tests
         run: uv run pytest -q
 
@@ -193,10 +202,17 @@ jobs:
         run: |
           set -euo pipefail
           SANDBOX="$RUNNER_TEMP/fresh"
+          # Diagnostics first. The hooks fail open by design, so a broken one
+          # returns nothing and looks identical to an empty store — the failure
+          # this step exists to catch is invisible without them.
+          echo "timeout:  $(command -v timeout  || echo 'absent (expected on stock macOS)')"
+          echo "gtimeout: $(command -v gtimeout || echo absent)"
+          echo "perl:     $(command -v perl     || echo absent)"
           out=$(echo '{"prompt":"what happened on the cold install"}' \
             | env HOME="$SANDBOX" PATH="$SANDBOX/.local/bin:$PATH" \
                   XDG_STATE_HOME="$SANDBOX/.local/state" \
                   bash "$SANDBOX/.claude/hooks/brain-context.sh")
+          echo "hook output: ${out:-<empty>}"
           echo "$out" | grep -q additionalContext
           echo "hook returned pointers"
 

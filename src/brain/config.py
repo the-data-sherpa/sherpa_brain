@@ -224,6 +224,22 @@ def default_workspace(cwd: Path | None = None) -> str:
     return "default"
 
 
+def running_on_darwin() -> bool:
+    """Platform dispatch behind a function call, deliberately.
+
+    ``if sys.platform == "darwin":`` is narrowed *statically* by mypy, using the
+    platform mypy itself is running on. With ``warn_unreachable`` that makes every
+    branch for the *other* platform dead code, so the type check fails on macOS, on
+    Linux, or on both, depending on which branches exist — and it passes locally
+    right up until CI runs the matrix.
+
+    A function call returns an ordinary ``bool`` that mypy cannot narrow, so both
+    branches stay type-checked on both platforms. It also keeps the dispatch
+    dynamic, which is what lets a test on one platform exercise the other's path.
+    """
+    return sys.platform == "darwin"
+
+
 def _deepest_mount(target: Path, mounts: list[tuple[Path, str]]) -> str | None:
     """The fstype of the longest mount point that is a prefix of ``target``.
 
@@ -287,10 +303,7 @@ def _darwin_mounts() -> list[tuple[Path, str]]:
 
 def fstype_of(path: Path) -> str | None:
     """Best-effort filesystem type for the mount containing ``path``."""
-    if sys.platform == "darwin":
-        mounts = _darwin_mounts()
-    else:
-        mounts = _linux_mounts()
+    mounts = _darwin_mounts() if running_on_darwin() else _linux_mounts()
     if not mounts:
         return None
     return _deepest_mount(path.resolve(), mounts)

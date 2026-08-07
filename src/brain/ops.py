@@ -25,7 +25,7 @@ import plistlib
 import sys
 from pathlib import Path
 
-from .config import Paths
+from .config import Paths, running_on_darwin
 
 UNIT_DIR = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "systemd" / "user"
 
@@ -153,7 +153,7 @@ def _install_launchd(paths: Paths, *, dry_run: bool) -> list[str]:
 
 
 def install_user_timers(paths: Paths, *, dry_run: bool = False) -> list[str]:
-    if sys.platform == "darwin":
+    if running_on_darwin():
         return _install_launchd(paths, dry_run=dry_run)
     return _install_systemd(paths, dry_run=dry_run)
 
@@ -165,7 +165,7 @@ def activation_commands() -> list[str]:
     a runbook that drifts from the tool is a runbook that gets followed into a
     non-working state.
     """
-    if sys.platform == "darwin":
+    if running_on_darwin():
         agents = launch_agents_dir()
         return [
             f"launchctl bootstrap gui/$(id -u) {agents}/dev.brain.sync.plist",
