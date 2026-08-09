@@ -26,19 +26,26 @@ The installer touches nothing outside `$HOME`, needs no `sudo`, and can be re-ru
 safely at any time — CI asserts the second run is byte-identical. It will not create
 the ledger repository or enable the timers for you; both are decisions, not steps.
 
-**It installs the CLI with `uv tool install --editable`, not into the project venv.**
+**It installs the CLI with `uv tool install`, not into the project venv.**
 That is load-bearing rather than stylistic. Every generated harness config records an
 absolute interpreter path, and an earlier setup recorded the *project* venv's — so
 recreating that venv broke every harness at once, silently, because the hooks fail
 open. A `uv` tool environment is independent of anything `uv sync` does in the
 checkout.
 
+**And not `--editable`, which it used to pass.** Editable fixes the interpreter half
+and leaves the source half: the tool environment still reads code from the checkout,
+so moving, renaming, or deleting it takes out the CLI and every scheduler unit at
+once. A store whose stated purpose is outliving things should not depend on a working
+tree. The cost is that developing `brain` no longer updates the installed `brain` —
+re-run the installer, or `uv tool install . --force`, to pick up your changes.
+
 By hand:
 
 ```bash
-uv tool install --editable .    # or: uv sync && uv pip install -e .
+uv tool install .               # not -e: the CLI should outlive the checkout
 brain init                      # probes the filesystem, refuses unsafe ones
-brain doctor                    # expect WARNs: no replica, no backup, empty store
+brain doctor                    # WARNs: no replica, no backup, no scheduler, empty store
 ```
 
 `brain init` refuses network filesystems and sync folders. That refusal is not

@@ -141,12 +141,22 @@ info "python3 ${DIM}$("$PY" -V 2>&1 | cut -d' ' -f2)${OFF}"
 
 step "Installing the brain CLI"
 
-# An editable *tool* install, not a project venv. The distinction is the whole
-# reason this step exists: every harness config generated below records an absolute
-# interpreter path, and an earlier setup recorded the project venv's. Recreating that
-# venv broke every harness at once, silently, because the hooks fail open.
-# `uv tool` keeps its own environment, so `uv sync` in the checkout cannot break it.
-run uv tool install --editable "$REPO" --force
+# A *tool* install, not a project venv. The distinction is the whole reason this step
+# exists: every harness config generated below records an absolute interpreter path,
+# and an earlier setup recorded the project venv's. Recreating that venv broke every
+# harness at once, silently, because the hooks fail open. `uv tool` keeps its own
+# environment, so `uv sync` in the checkout cannot break it.
+#
+# Not `--editable`, which this used to pass. Editable fixes the interpreter half and
+# leaves the source half: the tool env still reads code from $REPO, so moving,
+# renaming, or deleting the checkout takes out the CLI and every scheduler unit with
+# it. For a store whose stated purpose is outliving things, the memory system should
+# not depend on a working tree. A non-editable install copies the code in — including
+# the harness assets, which is what `adapters.harness_dir()`'s wheel branch is for.
+#
+# The cost is real and worth stating: developing brain no longer updates the installed
+# brain. Re-run this script (or `uv tool install . --force`) to pick up your changes.
+run uv tool install "$REPO" --force
 
 TOOL_BIN="${UV_TOOL_BIN_DIR:-$HOME/.local/bin}"
 if [ "$DRY_RUN" -eq 0 ]; then
