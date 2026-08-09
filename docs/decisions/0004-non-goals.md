@@ -28,6 +28,8 @@ Storage is not one of them.
 | Harness-specific adapters as planned scope | `AGENTS.md` + one MCP server + one CLI covers every target by construction. Cursor / Aider are contingency work, done on demonstrated breakage. OpenCode was promoted under the clause below — see the amendment |
 | Automatic entity resolution | Documented as unsolved in production. At single-user scale a hand-maintained alias list of ~200 entries beats a model |
 | Multi-user, ACLs, concurrent writers in v1 | `workspace` and `owner` fields carried from day one so migration is not a data-model rewrite |
+| Any network protocol as an agent-facing surface | A second way to spell `search`/`get`/`write`/`forget` is a second thing to keep correct, and an untyped one outside the tool loop |
+| A push-notification transport of any kind | IRC was proposed for this and rejected after four rounds — see the 2026-08-09 amendment, which records the six bounds any future attempt must meet and why a desktop notification from the existing sweep beats a bus |
 | Vector server, graph database, reranker | Gated on measured triggers in `0002-migration-triggers.md` |
 | Background extraction in v1 | Deferred by interview decision; the extractor is an interface with a stub |
 
@@ -55,3 +57,57 @@ Real isolation requires directory-per-workspace with OS permissions (available, 
 The clause above fired. OpenCode is in daily use by the operator, and the convention-covers-it argument holds for only half of it: it reads `AGENTS.md` natively, but its MCP configuration is a different schema — `mcp` rather than `mcpServers`, `command` as a single argv array, `environment` rather than `env`. The generic `.mcp.json` is not rejected by OpenCode; it is *ignored*, which makes the breakage silent rather than loud, and silent is the case worth spending a target on.
 
 Promoted for OpenCode only. Cursor and Aider remain contingency. The adapter merges into an existing `opencode.json` rather than overwriting it, because unlike `.mcp.json` that file is the harness's main config and holds unrelated user settings.
+
+## Amendment — 2026-08-09: IRC considered and rejected
+
+A proposal to give the store a way to speak — an IRC channel on which it announces its own state changes — was developed over four rounds of adversarial review and **rejected**. The gap it addressed is real. IRC is not the instrument for it.
+
+This is recorded at length rather than dropped, because the proposal is an attractive one that will be thought of again, and because how it shrank is more instructive than the conclusion.
+
+### The gap, which is real
+
+Every path into this store is pull. Nothing can say *the memory you cited ten minutes ago just went contested*, and a `CONTESTED` record is the one class that stays inert until a human learns it exists — `0001-conflict-precedence.md` refuses to resolve one without them. The store has two ways for an agent to speak to it and none to speak back.
+
+### What was proposed, and what four rounds left of it
+
+Each round removed a claim that could not survive contact with a mechanism.
+
+| Round | Claim | Why it failed |
+|---|---|---|
+| Initial | A durable, ordered, cross-harness transcript | A derived representation with no erasure rule. `brain forget` would clear the store and leave ids, contested history, and timing in a channel log no tombstone reaches — silently falsifying the deletion guarantee in `README.md` and `0005-storage-boundary.md` |
+| 1 | Emissions include truncated labels | A label *is* memory content, and `0006-prohibited-data.md` permits health, legal, financial, and third-party material inside it. "Pointer" names a function, not a sensitivity class |
+| 1 | Loopback preserves "the operator is the only reader" | Loopback alone does not. It narrowed ADR 0006's "a second reader in any form" to "a remote reader." *(The related objection that listeners are new readers was withdrawn: harnesses already read every memory file by filesystem access.)* |
+| 2 | `+m` makes the bounds mechanical | A channel mode is mutable runtime state. Mechanical requires the bot to verify and go silent when it lapses |
+| 2 | `doctor` checks heartbeat freshness | Freshness needs a stored observation, which the no-state and no-persistence rules both forbid |
+| 3 | Cross-harness sessions share one clock | Undeliverable. A per-prompt hook cannot receive a between-prompt event, and every bridge — long-lived subscriber or buffer — restores the retained state rounds 1 and 2 removed |
+| 3 | The bus gives the store a way to initiate | No producer was named. MCP and the CLI are pull surfaces and core may not learn IRC exists, so the bot could only *poll* |
+| 4 | A poller-fed notifier is worth the machinery | **Decisive.** See below |
+
+What survived to round 4 was: `brain doctor` and the conflict list, polled on an interval, diffed against an in-memory baseline, broadcast ids-only onto an ephemeral loopback channel, to one consumer — the operator's IRC client.
+
+### Why it was rejected
+
+**The last remaining justification refuted itself.** The argument for IRC over the existing scheduled sweep was that a bus is live where a sweep is periodic. But once the producer was forced to be a poller — which "core does not learn that IRC exists" requires — **the bus is periodic too.** The two mechanisms differ in interval and presentation, nothing more. A desktop notification driven by the same periodic check delivers the same value without an ircd, a bot process, channel-mode enforcement, voice-based identity, a heartbeat loop, or the self-monitoring that heartbeat then requires.
+
+Two further defects were found in the surviving design and are recorded so a revival does not rediscover them:
+
+- **Snapshot polling is not change notification.** A condition that appears and clears between two polls leaves both snapshots identical and emits nothing. The true contract is "differences observed at polling boundaries," which is weaker than the "state changes" the proposal advertised.
+- **Polling `brain doctor` from the bot is self-defeating** if `doctor` waits for that bot's heartbeat: a synchronous check blocks the process that must satisfy it, and the bot manufactures its own failure.
+
+### What to do instead
+
+Serve the gap through what already exists: the scheduled sweep from `brain install-timers`, reporting through the platform's desktop notification facility. Same periodicity, none of the apparatus. If notification proves unnecessary in practice, `brain doctor` and `brain conflicts list` remain as pull surfaces and nothing is owed.
+
+For the harness-session case specifically — an agent learning that something it relied on became contested — the answer is the per-prompt consult hook querying the store directly. That is the pull model this project already committed to (§9.1), and it needs no wire.
+
+### If this is ever revisited, the safe upper bound
+
+Recorded because the boundaries were argued to consensus even though the feature was not. Any future push-notification surface for this store must be **non-authoritative** (no fact depends on delivery; `brain conflicts list` stays the sole authority), **ephemeral** (no transcript, replay, or backfill — persistence would be a derived representation owing an erasure rule), **content-free** (ids and event classes; never labels, excerpts, or workspace names), **loopback-only** (a remote listener is a second reader and reopens `0006-prohibited-data.md` *before* the first message), **one-way with no input path** (an inbound path is a remote write endpoint and trips ADR 0002's concurrency trigger), and **fed only by polling existing read surfaces** with an in-memory baseline.
+
+Those six bounds are the durable output of this exercise. The transport that occasioned them is not.
+
+### What would reverse this
+
+- **A genuine push source inside the store** — an event feed core already maintains for its own reasons, making a notifier a subscriber rather than a poller. That removes the decisive argument, because the periodic/live distinction would become real.
+- **A harness gaining a long-lived subscriber** that can receive an event while no prompt is running. That revives the cross-harness case, which was withdrawn as undeliverable rather than unwanted.
+- **Desktop notification proving inadequate in practice** — measured, not assumed. If the sweep's notifications are missed or unusable and the operator demonstrably needs a live channel, the comparison that decided this changes.
