@@ -74,9 +74,9 @@ reader than a clean surface.
 ## Status
 
 **Phase 0.5 and Phase 1 complete, plus production hardening.** All fourteen build
-steps, all nineteen acceptance criteria, **244 tests** — of which 26 fork and
+steps, all nineteen acceptance criteria, **247 tests** — of which 26 fork and
 `os._exit` mid-protocol to prove crash safety, and 9 check conformance against a
-generic MCP client — mypy strict clean, four runtime dependencies.
+generic MCP client — mypy strict clean, four direct runtime dependencies.
 
 ```
 brain init / doctor / install-timers      brain forget <id> [--kind artifact|event]
@@ -135,10 +135,18 @@ sudo apt-get install git ripgrep jq && curl -LsSf https://astral.sh/uv/install.s
 brew install git ripgrep jq uv
 ```
 
-There are **four runtime Python dependencies** — `typer`, `pyyaml`, `jsonschema`,
-`mcp`. No embedding library, no vector store, no reranker, no TUI framework. That
-budget is a design constraint recorded in `IMPLEMENTATION-PLAN.md` §2.1, not an
-accident of scope.
+There are **four direct runtime Python dependencies** — `typer`, `pyyaml`,
+`jsonschema`, `mcp`. No embedding library, no vector store, no reranker, no TUI
+framework. That budget is a design constraint recorded in `IMPLEMENTATION-PLAN.md`
+§2.1, not an accident of scope.
+
+**Direct is doing real work in that sentence.** The budget counts external APIs this
+project chose to adopt; it is not a count of what lands on your disk. `mcp` 2.x
+brings its own tree — `pydantic`, `starlette`, `uvicorn`, `pyjwt`, `opentelemetry-api`
+and more — so the locked runtime closure is **38 distributions**, not four. That is a
+supply-chain surface worth auditing on its own terms, and `uv.lock` is where it is
+tracked. Nothing in that tree exports telemetry by default: `opentelemetry-api` is
+the instrumentation interface, with no SDK or exporter installed behind it.
 
 ### Two constraints that are properties of the design, not a package list
 

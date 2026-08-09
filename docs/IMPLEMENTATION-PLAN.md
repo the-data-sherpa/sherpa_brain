@@ -629,7 +629,7 @@ unscheduled), and `docs/RUNBOOK.md`.
 
 ## 5.6 Build status — COMPLETE
 
-All fourteen steps are built and all nineteen acceptance criteria in §1 pass. **133 tests**, four runtime dependencies, ~7,600 lines including tests.
+All fourteen steps are built and all nineteen acceptance criteria in §1 pass. **133 tests**, four direct runtime dependencies, ~7,600 lines including tests. *(Direct is load-bearing — see the note in `README.md`. The §2.1 budget governs adopted APIs, not the installed closure, which `mcp` 2.x grew to 38 distributions.)*
 
 | Step | Status |
 |---|---|
