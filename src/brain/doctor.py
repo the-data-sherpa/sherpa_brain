@@ -16,15 +16,41 @@ from __future__ import annotations
 
 import shutil
 from dataclasses import dataclass
+from datetime import datetime
 from enum import StrEnum
 from typing import Any
 
 from . import backup as backup_mod
-from . import config
+from . import config, ops
 from .config import Paths
 from .index import build
+from .model import utcnow
 from .store import deletion, ledger, lifecycle
 from .store.ops import pending_ops, stuck_ops
+
+#: The backup timer is daily. Three days tolerates a machine that was off over a
+#: weekend without tolerating a scheduler that is not running at all — and systemd's
+#: ``Persistent=true`` catches up a missed run on the next boot, so a genuinely
+#: scheduled backup does not stay this old just because the laptop was closed.
+BACKUP_STALE_DAYS = 3
+
+
+def _age_in_days(created_at: str) -> int | None:
+    """Age of an ISO-8601 timestamp, in whole days, or None if it will not parse.
+
+    Compared against ``utcnow()`` rather than a local clock. Every timestamp in this
+    store is UTC, and mixing the two is a bug that only shows up west or east of
+    Greenwich — silent, timezone-dependent, and already paid for once here.
+    """
+    try:
+        stamp = datetime.fromisoformat(created_at)
+        return (utcnow() - stamp).days
+    except (ValueError, TypeError):
+        # TypeError is the one that matters: subtracting a *naive* timestamp from an
+        # aware one raises rather than guessing a zone. Reporting "unparseable" is
+        # correct there — the alternative is assuming a zone and computing an age
+        # that is wrong by the offset.
+        return None
 
 
 class Level(StrEnum):
@@ -196,14 +222,116 @@ def _backup_health(p: Paths) -> list[Check]:
             )
         ]
     latest = backups[-1]
-    return [
-        Check(
-            "backup",
-            Level.OK,
-            f"latest {latest['generation']} via {latest['mechanism']}, "
-            f"{latest['files']} files, tombstone seq {latest['tombstone_seq']}",
-        )
-    ]
+    summary = (
+        f"latest {latest['generation']} via {latest['mechanism']}, "
+        f"{latest['files']} files, tombstone seq {latest['tombstone_seq']}"
+    )
+
+    # This check used to stop at existence, which meant a backup from any year
+    # reported OK — while this module's own docstring lists "a stale backup" among
+    # the things it catches. The gap was found the way it would be: a store whose
+    # only backup was five days old and four times smaller than the live store,
+    # under a scheduler that had never been installed.
+    age = _age_in_days(latest["created_at"])
+    if age is None:
+        return [Check("backup", Level.WARN, f"{summary} — created_at is unparseable")]
+    if age > BACKUP_STALE_DAYS:
+        return [
+            Check(
+                "backup",
+                Level.WARN,
+                f"{summary} — {age} days old",
+                "The backup timer is daily; this old means it is not running. "
+                "Check `brain doctor`'s scheduler line, then `brain backup create`.",
+            )
+        ]
+    return [Check("backup", Level.OK, summary)]
+
+
+def _scheduler_health(p: Paths) -> list[Check]:
+    """`expire`, `sync`, and `backup` are each correct and each useless unscheduled.
+
+    An absent scheduler disables all three at once and looks exactly like a quiet
+    one: every ordinary command keeps working, deletions never reach quorum, nothing
+    lapses, and no backup is taken. That is the failure mode this command exists to
+    make loud.
+
+    Everything here is WARN rather than FAIL, matching the graded rubric above and
+    the neighbouring checks — "no backup has ever been taken" and "pending
+    replication" are both WARN. A scheduler that will not run means protection is
+    *absent or incomplete*; it does not by itself prove an invariant is violated
+    right now, which is what FAIL is reserved for.
+    """
+    state = ops.scheduler_state()
+    fix_install = "brain install-timers"
+    fix_enable = (
+        "systemctl --user enable --now brain-sync.timer brain-expire.timer brain-backup.timer"
+    )
+
+    if not state.installed:
+        return [
+            Check(
+                "scheduler",
+                Level.WARN,
+                "sweep units are not installed — sync, expire, and backup never run",
+                fix_install,
+            )
+        ]
+    if state.broken_units:
+        return [
+            Check(
+                "scheduler",
+                Level.WARN,
+                "a sweep unit exists but cannot be understood: "
+                + ", ".join(state.broken_units),
+                fix_install,
+            )
+        ]
+    if state.broken_interpreters:
+        return [
+            Check(
+                "scheduler",
+                Level.WARN,
+                "a sweep unit names an interpreter that no longer exists: "
+                + ", ".join(state.broken_interpreters),
+                "Re-run `brain install-timers` from the installed CLI to rebind them.",
+            )
+        ]
+    if state.enabled is False:
+        return [
+            Check(
+                "scheduler",
+                Level.WARN,
+                "sweep units are installed but not enabled — writing a unit file "
+                "schedules nothing",
+                fix_enable,
+            )
+        ]
+    if state.active is False:
+        return [
+            Check(
+                "scheduler",
+                Level.WARN,
+                "sweep units are enabled but the scheduler reports them inactive — "
+                "masked, or the user manager is not running them",
+                fix_enable,
+            )
+        ]
+    if state.active is None:
+        # The distinction that matters: unverifiable is not healthy. A dead user
+        # manager, a missing systemctl, or an unreachable bus all land here, and each
+        # means the sweeps may be silently not running.
+        return [
+            Check(
+                "scheduler",
+                Level.WARN,
+                "sweep units look correct on disk, but the scheduler could not be "
+                "asked whether they are live — filesystem state alone cannot tell "
+                "'scheduled' from 'looks scheduled'",
+                "systemctl --user list-timers 'brain-*'   (or `launchctl list | grep dev.brain`)",
+            )
+        ]
+    return [Check("scheduler", Level.OK, "sweep units installed, enabled, and active")]
 
 
 def _lifecycle_health(p: Paths) -> list[Check]:
@@ -286,6 +414,7 @@ def run(p: Paths) -> tuple[list[Check], Level]:
         _integrity_health,
         _index_health,
         _backup_health,
+        _scheduler_health,
         _lifecycle_health,
         _capture_health,
     ):

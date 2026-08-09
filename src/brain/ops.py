@@ -22,7 +22,10 @@ from __future__ import annotations
 
 import os
 import plistlib
+import shutil
+import subprocess
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 from .config import Paths, running_on_darwin
@@ -37,8 +40,7 @@ def launch_agents_dir() -> Path:
 SERVICE = """\
 [Unit]
 Description=brain: {desc}
-Documentation=file://{repo}/docs/RUNBOOK.md
-
+{documentation}
 [Service]
 Type=oneshot
 Environment=BRAIN_STATE_DIR={state}
@@ -95,15 +97,42 @@ UNITS = (
 )
 
 
+def runbook_path() -> Path | None:
+    """The RUNBOOK, if this install can actually see one.
+
+    A dev checkout has ``docs/``; a wheel does not, because docs are not package
+    data. The old code computed ``parents[2]/docs/RUNBOOK.md`` unconditionally, which
+    was right from a checkout and wrong from an installed tool — and since a proper
+    install is the *recommended* path, the wrong case was the common one. Same
+    dual-location reasoning as ``adapters.harness_dir()``, except here the honest
+    answer when neither exists is to omit the field rather than invent a path.
+    """
+    candidate = Path(__file__).resolve().parents[2] / "docs" / "RUNBOOK.md"
+    return candidate if candidate.is_file() else None
+
+
+def _documentation_line() -> str:
+    """``Documentation=`` when there is a real file, otherwise nothing.
+
+    Returned with its own newline so the template stays flat: a unit with no
+    documentation should have no blank line where the field would have been.
+    """
+    runbook = runbook_path()
+    return f"Documentation=file://{runbook}\n" if runbook else ""
+
+
 def _install_systemd(paths: Paths, *, dry_run: bool) -> list[str]:
-    repo = Path(__file__).resolve().parents[2]
     written: list[str] = []
     if not dry_run:
         UNIT_DIR.mkdir(parents=True, exist_ok=True)
 
     for name, desc, command, schedule, jitter, _ in UNITS:
         service = SERVICE.format(
-            desc=desc, repo=repo, state=paths.root, python=sys.executable, command=command
+            desc=desc,
+            documentation=_documentation_line(),
+            state=paths.root,
+            python=sys.executable,
+            command=command,
         )
         timer = TIMER.format(desc=desc, schedule=schedule, jitter=jitter)
         for suffix, body in ((".service", service), (".timer", timer)):
@@ -150,6 +179,164 @@ def _install_launchd(paths: Paths, *, dry_run: bool) -> list[str]:
             target.write_bytes(body)
         written.append(str(target))
     return written
+
+
+@dataclass(frozen=True)
+class SchedulerState:
+    """What the scheduler looks like, from disk *and* from the scheduler itself.
+
+    An earlier version of this was deliberately subprocess-free, on the reasoning
+    that ``systemctl`` is absent in containers and CI. That was the wrong trade, and
+    review caught it: unit files, wants-links and a present interpreter can all be
+    correct while nothing runs — a masked timer, or a user manager that was never
+    started because the account has no lingering and nobody logged in graphically.
+    Filesystem evidence alone cannot distinguish "scheduled" from "looks scheduled",
+    so reporting it as *runnable* was exactly the overclaim this whole check exists
+    to prevent.
+
+    So the runtime is asked, and the answer is allowed to be "don't know":
+
+    - installed — the unit files exist where we wrote them
+    - enabled — a wants-link exists, in the persistent path or the ``--runtime`` one
+    - active — the scheduler itself says the timers are live. ``None`` means the
+      question could not be asked (no ``systemctl``, no bus, a dead manager), which
+      is reported as unverifiable rather than as healthy
+    - broken_interpreters — the ``ExecStart`` interpreter no longer exists
+    - broken_units — a unit file exists but cannot be understood: a corrupt plist, a
+      service with no ``ExecStart``. Ignoring these was a real defect; a unit that
+      cannot be parsed is broken, not absent
+    """
+
+    installed: bool
+    enabled: bool | None
+    active: bool | None
+    broken_interpreters: tuple[str, ...]
+    broken_units: tuple[str, ...]
+
+
+#: Long enough for a loaded manager to answer, short enough that `brain doctor` never
+#: hangs on a wedged bus. `subprocess`'s own timeout, not the `timeout(1)` binary,
+#: which macOS does not ship.
+_QUERY_TIMEOUT_S = 5
+
+
+def _ask(argv: list[str]) -> tuple[int, str] | None:
+    """Run a query, or return None if the question cannot be asked at all."""
+    exe = shutil.which(argv[0])
+    if not exe:
+        return None
+    try:
+        r = subprocess.run(
+            [exe, *argv[1:]], capture_output=True, text=True, timeout=_QUERY_TIMEOUT_S
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return r.returncode, (r.stdout + r.stderr).strip()
+
+
+def _systemd_active(timers: list[str]) -> bool | None:
+    answer = _ask(["systemctl", "--user", "is-active", *timers])
+    if answer is None:
+        return None
+    code, out = answer
+    if code == 0:
+        return True
+    # "Failed to connect to bus" is not the same answer as "inactive". The first
+    # means the manager is not there to ask; calling that False would report a
+    # definite failure we have not established.
+    if "bus" in out.lower() or "failed to connect" in out.lower():
+        return None
+    return False
+
+
+def _launchd_active(labels: list[str]) -> bool | None:
+    for label in labels:
+        answer = _ask(["launchctl", "list", label])
+        if answer is None:
+            return None
+        if answer[0] != 0:
+            return False
+    return True
+
+
+def _runtime_wants_dir() -> Path:
+    """Where ``systemctl --user enable --runtime`` puts its links, unlike the default."""
+    uid = os.getuid()
+    return Path(os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{uid}")) / "systemd" / "user"
+
+
+def _systemd_state() -> SchedulerState:
+    services = [UNIT_DIR / f"{name}.service" for name, *_ in UNITS]
+    timers = [UNIT_DIR / f"{name}.timer" for name, *_ in UNITS]
+    installed = all(u.is_file() for u in (*services, *timers))
+
+    wants_dirs = (UNIT_DIR / "timers.target.wants", _runtime_wants_dir() / "timers.target.wants")
+    enabled = installed and all(
+        any((d / t.name).exists() for d in wants_dirs) for t in timers
+    )
+
+    broken_interpreters: list[str] = []
+    broken_units: list[str] = []
+    for service in services:
+        if not service.is_file():
+            continue
+        execs = [ln for ln in service.read_text().splitlines() if ln.startswith("ExecStart=")]
+        if not execs:
+            broken_units.append(service.name)
+            continue
+        argv = execs[0].removeprefix("ExecStart=").split()
+        if not argv:
+            broken_units.append(service.name)
+        elif not Path(argv[0]).exists():
+            broken_interpreters.append(argv[0])
+
+    active = _systemd_active([t.name for t in timers]) if enabled else None
+    return SchedulerState(
+        installed,
+        enabled,
+        active,
+        tuple(sorted(set(broken_interpreters))),
+        tuple(sorted(set(broken_units))),
+    )
+
+
+def _launchd_state() -> SchedulerState:
+    agents = launch_agents_dir()
+    labels = [f"dev.brain.{name.removeprefix('brain-')}" for name, *_ in UNITS]
+    plists = [agents / f"{label}.plist" for label in labels]
+    installed = all(p.is_file() for p in plists)
+
+    broken_interpreters: list[str] = []
+    broken_units: list[str] = []
+    for plist in plists:
+        if not plist.is_file():
+            continue
+        try:
+            argv = plistlib.loads(plist.read_bytes()).get("ProgramArguments") or []
+        except Exception:
+            # A plist that will not parse is a unit that will not run. The previous
+            # version swallowed this and let the check degrade to INFO.
+            broken_units.append(plist.name)
+            continue
+        if not argv:
+            broken_units.append(plist.name)
+        elif not Path(argv[0]).exists():
+            broken_interpreters.append(argv[0])
+
+    # launchd bootstrap state is not a filesystem fact, so `enabled` stays unknown and
+    # `active` carries the real answer — from launchctl, when it can be reached.
+    active = _launchd_active(labels) if installed else None
+    return SchedulerState(
+        installed,
+        None,
+        active,
+        tuple(sorted(set(broken_interpreters))),
+        tuple(sorted(set(broken_units))),
+    )
+
+
+def scheduler_state() -> SchedulerState:
+    return _launchd_state() if running_on_darwin() else _systemd_state()
 
 
 def install_user_timers(paths: Paths, *, dry_run: bool = False) -> list[str]:
