@@ -282,8 +282,7 @@ def _scheduler_health(p: Paths) -> list[Check]:
             Check(
                 "scheduler",
                 Level.WARN,
-                "a sweep unit exists but cannot be understood: "
-                + ", ".join(state.broken_units),
+                "a sweep unit exists but cannot be understood: " + ", ".join(state.broken_units),
                 fix_install,
             )
         ]
@@ -302,8 +301,7 @@ def _scheduler_health(p: Paths) -> list[Check]:
             Check(
                 "scheduler",
                 Level.WARN,
-                "sweep units are installed but not enabled — writing a unit file "
-                "schedules nothing",
+                "sweep units are installed but not enabled — writing a unit file schedules nothing",
                 fix_enable,
             )
         ]

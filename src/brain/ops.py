@@ -271,9 +271,7 @@ def _systemd_state() -> SchedulerState:
     installed = all(u.is_file() for u in (*services, *timers))
 
     wants_dirs = (UNIT_DIR / "timers.target.wants", _runtime_wants_dir() / "timers.target.wants")
-    enabled = installed and all(
-        any((d / t.name).exists() for d in wants_dirs) for t in timers
-    )
+    enabled = installed and all(any((d / t.name).exists() for d in wants_dirs) for t in timers)
 
     broken_interpreters: list[str] = []
     broken_units: list[str] = []

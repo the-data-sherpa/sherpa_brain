@@ -213,7 +213,7 @@ def test_installed_enabled_and_active_is_ok(unit_dir: Path) -> None:
 
 
 def test_a_dead_bus_is_unknown_rather_than_inactive(monkeypatch: pytest.MonkeyPatch) -> None:
-    """"Failed to connect to bus" is not the same answer as "inactive"."""
+    """ "Failed to connect to bus" is not the same answer as "inactive"."""
     monkeypatch.setattr(ops, "_ask", lambda _argv: (1, "Failed to connect to bus: No such file"))
     assert ops._systemd_active(["brain-sync.timer"]) is None
     monkeypatch.setattr(ops, "_ask", lambda _argv: (3, "inactive"))
