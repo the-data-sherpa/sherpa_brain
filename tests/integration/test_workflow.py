@@ -72,7 +72,7 @@ def test_context_survives_a_broken_store(paths: Paths, monkeypatch: pytest.Monke
     def boom(*_a: object, **_k: object) -> None:
         raise RuntimeError("index on fire")
 
-    monkeypatch.setattr(workflow.Fts5Backend, "search", boom)
+    monkeypatch.setattr("brain.workflow.Fts5Backend.search", boom)
     result = workflow.context(paths, "anything at all")
     assert result["relevant"] == 0
     assert result["degraded"] is True

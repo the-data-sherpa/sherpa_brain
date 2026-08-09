@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 from datetime import date, timedelta
 from pathlib import Path
 
 import pytest
+from tests.conftest import mcp_call
 
 from brain import doctor, mcp_server, scan
 from brain.config import Paths
@@ -97,9 +97,7 @@ class TestMcpRedaction:
     def _point(self, paths: Paths, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(mcp_server, "_paths", lambda: paths)
 
-    @staticmethod
-    def call(name: str, **args: object) -> dict:
-        return json.loads(asyncio.run(mcp_server.mcp.call_tool(name, args)).content[0].text)
+    call = staticmethod(mcp_call)
 
     def test_get_redacts_and_says_so(self, paths: Paths) -> None:
         m = seed_with_secret(paths)
@@ -122,9 +120,7 @@ class TestIdempotency:
     def _point(self, paths: Paths, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(mcp_server, "_paths", lambda: paths)
 
-    @staticmethod
-    def call(name: str, **args: object) -> dict:
-        return json.loads(asyncio.run(mcp_server.mcp.call_tool(name, args)).content[0].text)
+    call = staticmethod(mcp_call)
 
     def test_a_retried_write_returns_the_original_result(self, paths: Paths) -> None:
         """Not merely 'avoids a duplicate' — a client that retries after a timeout

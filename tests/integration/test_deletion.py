@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import shutil
 from datetime import date
+from pathlib import Path
 
 import pytest
 
@@ -93,7 +94,7 @@ def test_tombstoned_content_is_never_searchable(paths: Paths) -> None:
     conn.close()
 
 
-def test_restoring_a_pre_deletion_backup_does_not_resurrect(paths: Paths, tmp_path) -> None:
+def test_restoring_a_pre_deletion_backup_does_not_resurrect(paths: Paths, tmp_path: Path) -> None:
     """THE headline test.
 
     Take a backup. Delete. Restore the *pre-deletion* backup — which of course brings

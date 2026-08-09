@@ -64,6 +64,10 @@ ignore = ["E501"]
 
 [tool.mypy]
 python_version = "3.12"
-files = ["src/brain"]
+# Tests are checked too. They were excluded, and drifted: the MCP 2.x move left three
+# copies of a call helper reaching for `.structuredContent`, a field v2 renamed to
+# `structured_content` — dead code that would have raised AttributeError had it ever
+# been reached. Nothing caught it because nothing looked.
+files = ["src/brain", "tests"]
 strict = true
 warn_unreachable = true

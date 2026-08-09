@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import plistlib
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -33,12 +34,12 @@ map auto_home on /System/Volumes/Data/home (autofs, automounted, nobrowse)
 
 @pytest.fixture
 def on_darwin(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(config.sys, "platform", "darwin")
+    monkeypatch.setattr(sys, "platform", "darwin")
 
     def fake_mount(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
         return subprocess.CompletedProcess(["/sbin/mount"], 0, DARWIN_MOUNT, "")
 
-    monkeypatch.setattr(config.subprocess, "run", fake_mount)
+    monkeypatch.setattr(subprocess, "run", fake_mount)
 
 
 def test_darwin_mount_parsing_finds_the_deepest_mount(on_darwin: None) -> None:
@@ -66,7 +67,7 @@ def test_mount_points_with_spaces_survive_parsing(on_darwin: None) -> None:
 def test_an_unsupported_kernel_is_refused_before_anything_is_written(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    monkeypatch.setattr(config.sys, "platform", "win32")
+    monkeypatch.setattr(sys, "platform", "win32")
     with pytest.raises(config.PreconditionError, match="not supported"):
         config.check_preconditions(tmp_path)
 
@@ -106,7 +107,7 @@ def test_a_platform_with_no_exchange_fails_the_probe_instead_of_crashing(
 def test_macos_gets_launch_agents_not_systemd_units(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, paths: Paths
 ) -> None:
-    monkeypatch.setattr(ops.sys, "platform", "darwin")
+    monkeypatch.setattr(sys, "platform", "darwin")
     monkeypatch.setenv("HOME", str(tmp_path))
 
     written = ops.install_user_timers(paths)
@@ -129,9 +130,9 @@ def test_every_sweep_is_scheduled_on_both_platforms(
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setattr(ops, "UNIT_DIR", tmp_path / "systemd")
 
-    monkeypatch.setattr(ops.sys, "platform", "darwin")
+    monkeypatch.setattr(sys, "platform", "darwin")
     darwin = " ".join(ops.install_user_timers(paths))
-    monkeypatch.setattr(ops.sys, "platform", "linux")
+    monkeypatch.setattr(sys, "platform", "linux")
     linux = " ".join(ops.install_user_timers(paths))
 
     for sweep in ("sync", "expire", "backup"):
@@ -148,7 +149,7 @@ def test_activation_commands_name_every_unit_that_was_written(
     monkeypatch.setattr(ops, "UNIT_DIR", tmp_path / "systemd")
 
     for platform in ("linux", "darwin"):
-        monkeypatch.setattr(ops.sys, "platform", platform)
+        monkeypatch.setattr(sys, "platform", platform)
         ops.install_user_timers(paths)
         commands = " ".join(ops.activation_commands())
         for sweep in ("sync", "expire", "backup"):
@@ -161,6 +162,6 @@ def test_dry_run_writes_nothing(
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setattr(ops, "UNIT_DIR", tmp_path / "systemd")
     for platform in ("linux", "darwin"):
-        monkeypatch.setattr(ops.sys, "platform", platform)
+        monkeypatch.setattr(sys, "platform", platform)
         for path in ops.install_user_timers(paths, dry_run=True):
             assert not Path(path).exists()

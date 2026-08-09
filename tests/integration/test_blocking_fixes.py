@@ -6,12 +6,12 @@ it broke the guarantee that eleven rounds of design review were spent establishi
 
 from __future__ import annotations
 
-import asyncio
 import json
 from datetime import date, timedelta
 from pathlib import Path
 
 import pytest
+from tests.conftest import mcp_call
 
 from brain import mcp_server
 from brain.config import Paths
@@ -101,10 +101,7 @@ class TestMcpCorrection:
     def _point(self, paths: Paths, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(mcp_server, "_paths", lambda: paths)
 
-    @staticmethod
-    def call(name: str, **args: object) -> dict:
-        result = asyncio.run(mcp_server.mcp.call_tool(name, args))
-        return json.loads(result.content[0].text)
+    call = staticmethod(mcp_call)
 
     def test_get_returns_a_revision_token(self) -> None:
         mid = self.call("brain.write", op="propose", content="body", volatility="slow")["id"]

@@ -220,6 +220,7 @@ def test_sustained_decline_beyond_the_margin_triggers_a_decision_prompt() -> Non
     series = [stats.wilson(c, 200) for c in (180, 160, 140)]
     verdict = stats.slope_verdict(series)
     assert verdict.computable and verdict.triggered
+    assert verdict.decline_pp is not None
     assert verdict.decline_pp >= stats.PRE_REGISTERED_MARGIN_PP
     assert "DECISION PROMPT" in verdict.reason, "the trigger opens a review, never a build"
 

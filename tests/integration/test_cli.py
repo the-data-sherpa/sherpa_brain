@@ -9,9 +9,10 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
-from typer.testing import CliRunner
+from typer.testing import CliRunner, Result
 
 from brain.cli import EXIT_EMPTY, EXIT_FAIL_CLOSED, EXIT_INVALID, EXIT_OK, app
 
@@ -25,8 +26,9 @@ def store(tmp_path: Path) -> str:
     return d
 
 
-def payload(result) -> dict:  # type: ignore[no-untyped-def]
-    return json.loads(result.stdout)["data"]
+def payload(result: Result) -> dict[str, Any]:
+    data: dict[str, Any] = json.loads(result.stdout)["data"]
+    return data
 
 
 def test_remember_then_search_then_get(store: str) -> None:

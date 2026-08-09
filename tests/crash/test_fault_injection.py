@@ -64,7 +64,7 @@ def crash_after(paths: Paths, n_syscalls: int, payload: bytes, predecessor: str 
             if count["n"] >= n_syscalls:
                 os._exit(70)
 
-        os.fsync = counting_fsync  # type: ignore[assignment]
+        os.fsync = counting_fsync
         atomic.os.fsync = counting_fsync  # type: ignore[attr-defined]
         with contextlib.suppress(BaseException):
             mem.write(paths, MID, payload, predecessor)

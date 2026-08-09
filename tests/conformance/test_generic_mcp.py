@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import Any
 
 import pytest
 
@@ -27,13 +26,7 @@ def _point_server_at_tmp(paths: Paths, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(mcp_server, "_paths", lambda: paths)
 
 
-def call(name: str, **args: Any) -> dict:
-    """Drive a tool the way a generic MCP client would: by name, with a dict."""
-    result = asyncio.run(mcp_server.mcp.call_tool(name, args))
-    for block in result.content:
-        if getattr(block, "text", None):
-            return json.loads(block.text)
-    return result.structuredContent or {}
+from tests.conftest import mcp_call as call  # noqa: E402
 
 
 def test_the_tool_surface_is_four_tools() -> None:

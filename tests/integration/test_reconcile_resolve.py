@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from datetime import date
+from pathlib import Path
 
 import pytest
 
@@ -64,20 +65,22 @@ def test_transaction_time_is_an_interval_not_a_point(paths: Paths) -> None:
     assert result.recorded_from < result.recorded_to
 
 
-def test_file_in_flux_is_deferred_never_snapshotted(paths: Paths, monkeypatch) -> None:
+def test_file_in_flux_is_deferred_never_snapshotted(
+    paths: Paths, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A hash taken mid-save reads a torn file, so an unstable read must not capture."""
     m = seed(paths)
     dest = mem.present_path(paths, "default", "semantic", m.id)
     dest.write_text(serialize(make(0, "changing")))
 
     calls = {"n": 0}
-    real = reconcile.Path.read_bytes
+    real = Path.read_bytes
 
     def flaky(self):  # type: ignore[no-untyped-def]
         calls["n"] += 1
         return real(self) + (b"x" * calls["n"] if self == dest else b"")
 
-    monkeypatch.setattr(reconcile.Path, "read_bytes", flaky)
+    monkeypatch.setattr("brain.store.reconcile.Path.read_bytes", flaky)
     result = reconcile.reconcile_one(paths, m.id, dest)
 
     assert isinstance(result, reconcile.Deferred)

@@ -71,8 +71,7 @@ def test_naive_timestamp_is_unknown_rather_than_silently_offset() -> None:
 
 def _backup(monkeypatch: pytest.MonkeyPatch, *, days_old: int) -> list[doctor.Check]:
     monkeypatch.setattr(
-        doctor.backup_mod,
-        "list_backups",
+        "brain.doctor.backup_mod.list_backups",
         lambda _p: [
             {
                 "generation": "20260101T000000.000Z",
