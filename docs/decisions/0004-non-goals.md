@@ -94,17 +94,33 @@ Two further defects were found in the surviving design and are recorded so a rev
 - **Snapshot polling is not change notification.** A condition that appears and clears between two polls leaves both snapshots identical and emits nothing. The true contract is "differences observed at polling boundaries," which is weaker than the "state changes" the proposal advertised.
 - **Polling `brain doctor` from the bot is self-defeating** if `doctor` waits for that bot's heartbeat: a synchronous check blocks the process that must satisfy it, and the bot manufactures its own failure.
 
-### What to do instead
+### What to do instead — nothing, for now
 
-Serve the gap through what already exists: the scheduled sweep from `brain install-timers`, reporting through the platform's desktop notification facility. Same periodicity, none of the apparatus. If notification proves unnecessary in practice, `brain doctor` and `brain conflicts list` remain as pull surfaces and nothing is owed.
+An earlier version of this section proposed serving the gap "through what already exists: the scheduled sweep from `brain install-timers`, reporting through the platform's desktop notification facility." **Both halves of that sentence were wrong, and the correction is instructive.**
 
-For the harness-session case specifically — an agent learning that something it relied on became contested — the answer is the per-prompt consult hook querying the store directly. That is the pull model this project already committed to (§9.1), and it needs no wire.
+**There is no such sweep.** `UNITS` in `src/brain/ops.py` contains exactly three entries — `brain-sync`, `brain-expire`, `brain-backup`. None of them evaluates health or conflicts. The alternative that decided the IRC question was itself resting on infrastructure the code does not contain, which is a reminder that a replacement argued from memory rather than from the source is not an argument.
+
+**And desktop notification fails the same bounds.** Reviewed on its own terms rather than as IRC's leftover, it did not pass either:
+
+- **Mako retains a history buffer.** `makoctl restore` and `dismiss --no-history` both exist, so an ordinarily dismissed notification leaves a replayable copy that `brain forget` never reaches. In-memory and session-scoped is smaller than a channel log; it is the same class of defect. `notify-send --transient` may bypass it, unverified. macOS Notification Center retention is likewise unverified.
+- **Dedup owes obligations that were never designed.** Recording announcements in the event log is not the clean answer it appears to be: the class is erasable, but deletion does not *propagate* to it. Forgetting a memory would leave an announcement event naming its id, because purge is keyed by event id and nothing walks event payloads for references. The class being erasable is not the same as the record being erased.
+- **The dedup writer is a durable writer**, which trips ADR 0002's concurrency trigger as literally written.
+- **Recording an attempt is not evidence of delivery.** With a missing binary or no GUI session as a silent no-op, an announcement could be suppressed forever having never appeared.
+- **`doctor` exits 4 on FAIL**, which the systemd template's `SuccessExitStatus=0 1 3` does not accept, and launchd has no equivalent at all.
+
+That is a new cross-platform push subsystem — the thing the row in this ADR's non-goals table now forbids — not "the same value at a fraction of the machinery."
+
+So the answer is the pull surfaces, unchanged: **`brain doctor` and `brain conflicts list`**, which remain the sole authority and owe nothing. For the harness-session case — an agent learning that something it relied on became contested — the answer is the per-prompt consult hook querying the store directly. That is the pull model this project already committed to (§9.1), and it needs no wire and no toast.
+
+**What would justify revisiting:** measured disuse — contested memories sitting unresolved because the operator does not run the pull commands. Evidence, not the observation that notification was the last alternative standing after IRC fell. If that evidence arrives, start with a stateless scheduled command emitting a generic, transient, content-free alert ("Brain needs attention — run `brain conflicts list`"), tolerate repeats, and add durable dedup only once repetition is demonstrated to be a real problem rather than an anticipated one.
 
 ### If this is ever revisited, the safe upper bound
 
 Recorded because the boundaries were argued to consensus even though the feature was not. Any future push-notification surface for this store must be **non-authoritative** (no fact depends on delivery; `brain conflicts list` stays the sole authority), **ephemeral** (no transcript, replay, or backfill — persistence would be a derived representation owing an erasure rule), **content-free** (ids and event classes; never labels, excerpts, or workspace names), **loopback-only** (a remote listener is a second reader and reopens `0006-prohibited-data.md` *before* the first message), **one-way with no input path** (an inbound path is a remote write endpoint and trips ADR 0002's concurrency trigger), and **fed only by polling existing read surfaces** with an in-memory baseline.
 
 Those six bounds are the durable output of this exercise. The transport that occasioned them is not.
+
+They have since been tested against a **non-network** surface — desktop notification — and they held, which is the first evidence they generalise rather than describing IRC in other words. Two translate rather than apply literally: *loopback-only* becomes "delivery confined to the operator's local GUI session, no remote notification service," and *one-way* becomes "notification actions must not invoke correction, resolution, or forgetting." The bound that bit was **ephemerality**, and it bit for the same reason it bit IRC: the delivery mechanism kept a replayable copy the store cannot erase. That appears to be the bound most likely to decide any future proposal, and the one a proposal is most likely to assume it satisfies without checking.
 
 ### What would reverse this
 
