@@ -13,7 +13,11 @@ dependencies = [
     "typer>=0.15",
     "pyyaml>=6.0",
     "jsonschema>=4.23",
-    "mcp>=1.2",
+    # Floor is 2, not 1.x: this server imports `MCPServer`, which is the v2 rename
+    # of `FastMCP`. A 1.x resolve does not degrade — it fails at import. Capped at
+    # <3 so the next breaking major is a resolution error rather than a runtime one;
+    # raise it after v3 passes the conformance suite, not before.
+    "mcp>=2,<3",
 ]
 
 [project.scripts]
