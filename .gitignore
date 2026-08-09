@@ -88,3 +88,6 @@ desktop.ini
 /purges.jsonl
 /idempotency.json
 /brain.sqlite3*
+
+# Generated media dropped in by other tools — not part of this project.
+cream-media/
