@@ -364,3 +364,18 @@ def test_bootstrap_prefers_distinctive_terms(paths: Paths) -> None:
     candidates = {c.expect_ids[0]: c for c in bootstrap.draft(paths)}
     distinctive = candidates["01K1Z8V4Q00000000000000009"]
     assert "cerulean" in distinctive.question or "flamingo" in distinctive.question
+
+
+def test_the_eval_set_defaults_into_the_state_dir_not_the_cwd(paths: Paths) -> None:
+    """The golden set is derived from memory bodies, so where it lands matters.
+
+    `--dir` used to default to the literal "eval", relative to whatever directory you
+    ran from. Bootstrapping inside a checkout therefore wrote memory-derived questions,
+    expected ids, workspace names, and a state-facts file into the repository —
+    untracked but not ignored, one `git add -A` from publication. ADR 0005 rule 2 puts
+    anything retractable outside git, so the default belongs with the store.
+
+    A `.gitignore` entry is defence in depth; this is the fix.
+    """
+    assert paths.eval_dir == paths.root / "eval"
+    assert paths.root not in Path.cwd().parents

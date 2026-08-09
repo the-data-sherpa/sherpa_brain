@@ -91,3 +91,11 @@ desktop.ini
 
 # Generated media dropped in by other tools — not part of this project.
 cream-media/
+
+# The eval golden set is derived from memory content, so it belongs in the state
+# dir, never in git (ADR 0005 rule 2). The CLI default now points there; this is
+# defence in depth for an explicit `--dir eval` run from the checkout.
+#
+# Root-anchored on purpose: a bare `eval/` also matches src/brain/eval/, which
+# would silently hide new source files in that package from `git status`.
+/eval/

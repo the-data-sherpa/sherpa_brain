@@ -120,6 +120,17 @@ class Paths:
         return self.root / "backups"
 
     @property
+    def eval_dir(self) -> Path:
+        """The golden set lives with the store, not in whatever directory you ran from.
+
+        It is derived from memory bodies — questions built from real content, expected
+        ids, workspace names, and a state-facts file describing what the operator
+        knows. ADR 0005 rule 2 keeps anything retractable out of git, and a cwd-relative
+        default put exactly that inside whichever checkout you happened to be in.
+        """
+        return self.root / "eval"
+
+    @property
     def db(self) -> Path:
         return self.root / "brain.sqlite3"
 

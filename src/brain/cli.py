@@ -709,15 +709,16 @@ def backup_restore(
 
 @eval_app.command("bootstrap")
 def eval_bootstrap(
-    eval_dir: Annotated[str, typer.Option("--dir")] = "eval",
+    eval_dir: Annotated[str | None, typer.Option("--dir")] = None,
     state: StateOpt = None,
 ) -> None:
     """Draft golden-set candidates from your corpus. They are DRAFTS — rewrite them."""
     from .eval import bootstrap as bootstrap_mod
 
     p = _paths(state)
+    d = Path(eval_dir) if eval_dir else p.eval_dir
     candidates = bootstrap_mod.draft(p)
-    written = bootstrap_mod.write_templates(Path(eval_dir), candidates)
+    written = bootstrap_mod.write_templates(d, candidates)
     emit({"drafted": len(candidates), **written})
     err(
         "Drafted questions use the memory's own words, so they test lexical matching "
@@ -727,7 +728,7 @@ def eval_bootstrap(
 
 @eval_app.command("run")
 def eval_run(
-    eval_dir: Annotated[str, typer.Option("--dir")] = "eval",
+    eval_dir: Annotated[str | None, typer.Option("--dir")] = None,
     memory_off: Annotated[bool, typer.Option("--memory-off", help="The control arm.")] = False,
     state: StateOpt = None,
 ) -> None:
@@ -735,7 +736,7 @@ def eval_run(
     from .eval import runner
 
     p = _paths(state)
-    d = Path(eval_dir)
+    d = Path(eval_dir) if eval_dir else _paths(state).eval_dir
     record = runner.run(p, d / "golden.yaml", memory_off=memory_off, results_dir=d / "results")
     if record.score["total"] == 0:
         err(f"no cases in {d / 'golden.yaml'} — run `brain eval bootstrap` first")
@@ -755,14 +756,16 @@ def eval_run(
 
 @eval_app.command("probe")
 def eval_probe(
-    eval_dir: Annotated[str, typer.Option("--dir")] = "eval",
+    eval_dir: Annotated[str | None, typer.Option("--dir")] = None,
     state: StateOpt = None,
 ) -> None:
     """State-recovery probe: can the store reconstruct known-true facts, cold?"""
     from .eval import runner
 
     p = _paths(state)
-    result = runner.state_recovery(p, Path(eval_dir) / "state-facts.yaml")
+    result = runner.state_recovery(
+        p, (Path(eval_dir) if eval_dir else p.eval_dir) / "state-facts.yaml"
+    )
     emit(result)
     if result["total"] == 0:
         raise typer.Exit(EXIT_EMPTY)
@@ -770,13 +773,13 @@ def eval_probe(
 
 @eval_app.command("slope")
 def eval_slope(
-    eval_dir: Annotated[str, typer.Option("--dir")] = "eval",
+    eval_dir: Annotated[str | None, typer.Option("--dir")] = None,
     state: StateOpt = None,
 ) -> None:
     """The tenure trigger. Refuses to compute below the item floor."""
     from .eval import runner
 
-    v = runner.verdict(Path(eval_dir) / "results")
+    v = runner.verdict((Path(eval_dir) if eval_dir else _paths(state).eval_dir) / "results")
     emit(
         {
             "computable": v.computable,
